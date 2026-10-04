@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,9 @@ sys.path.insert(0, str(MACOS))
 import build
 import install
 
+REAL_COMPILER = build.compile_native_launcher
+FIXTURE_EXECUTABLE = b'\xcf\xfa\xed\xfeOFFLINE PACKAGING FIXTURE; DO NOT EXECUTE\n'
+
 
 class PackagingTests(unittest.TestCase):
     def setUp(self):
@@ -29,6 +33,10 @@ class PackagingTests(unittest.TestCase):
         self.home = self.root / 'account'
         self.source.mkdir()
         self.home.mkdir()
+        compiler_patch = patch.object(build, 'compile_native_launcher',
+                                      side_effect=self.compile_fixture)
+        self.compiler = compiler_patch.start()
+        self.addCleanup(compiler_patch.stop)
         for relative in (*build.PAYLOAD_FILES, *build.SOURCE_EXTRA_FILES):
             target = self.source / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -40,6 +48,12 @@ class PackagingTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
+
+    def compile_fixture(self, payload, destination, cache):
+        self.assertEqual((payload / build.NATIVE_SOURCE).read_bytes(),
+                         (self.source / build.NATIVE_SOURCE).read_bytes())
+        self.assertTrue(cache.parent.is_dir())
+        destination.write_bytes(FIXTURE_EXECUTABLE)
 
     def make_receipt(self, reuse=False):
         app = self.home / 'Applications/codex-usage-bar.app'
@@ -67,21 +81,86 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(actual, set(build.PAYLOAD_FILES))
         self.assertEqual({f['path'] for f in manifest['files']}, actual)
         for entry in manifest['files']:
-            self.assertEqual(len(entry['sha256']), 64)
+            self.assertEqual(entry['sha256'], hashlib.sha256(
+                (payload / entry['path']).read_bytes()).hexdigest())
         self.assertNotIn(str(self.root), json.dumps(manifest))
         self.assertEqual(stat.S_IMODE((app / 'Contents/MacOS/codex-usage-bar').stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((payload / 'platforms/macos/Start.command').stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((payload / 'platforms/macos/Test.command').stat().st_mode), 0o755)
         install.verify_owned_app(app)
 
-    def test_app_launcher_defaults_to_daily_start_command(self):
+    def test_app_launcher_is_native_and_tracks_its_source_and_output(self):
         app = self.root / 'app.app'
-        build.build_app(app, _source_root=self.source)
-        wrapper = (app / 'Contents/MacOS/codex-usage-bar').read_text()
-        self.assertIn('/platforms/macos/Start.command', wrapper)
-        self.assertNotIn('/platforms/macos/Test.command', wrapper)
+        manifest = build.build_app(app, _source_root=self.source)
+        binary = app / 'Contents/MacOS/codex-usage-bar'
+        self.assertEqual(binary.read_bytes(), FIXTURE_EXECUTABLE)
+        self.compiler.assert_called_once()
+        native = manifest['nativeLauncher']
+        self.assertEqual(native['path'], 'Contents/MacOS/codex-usage-bar')
+        self.assertEqual(native['format'], 'Mach-O')
+        self.assertEqual(native['source'], 'platforms/macos/Launcher.swift')
+        self.assertEqual(native['sha256'], hashlib.sha256(binary.read_bytes()).hexdigest())
+        self.assertEqual(native['sourceSha256'], hashlib.sha256(
+            (self.source / build.NATIVE_SOURCE).read_bytes()).hexdigest())
+        info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+        self.assertTrue(info['LSUIElement'])
+        self.assertEqual(info['CFBundleExecutable'], build.PRODUCT)
+        self.assertEqual(info['LSMinimumSystemVersion'], native['minimumMacOSVersion'])
         self.assertIn('codex_bar/daily_host.py', build.PAYLOAD_FILES)
         self.assertIn('tests/test_daily_host.py', build.SOURCE_EXTRA_FILES)
+
+    def test_swift_compiler_uses_copied_source_and_no_shell(self):
+        payload = self.root / 'copy with spaces'
+        destination = self.root / 'output with spaces/launcher'
+        cache = self.root / 'cache'
+        with patch.object(build.subprocess, 'run') as run, \
+                patch.object(build.platform, 'machine', return_value='arm64'):
+            run.return_value.returncode = 0
+            REAL_COMPILER(payload, destination, cache)
+        arguments, options = run.call_args
+        command = arguments[0]
+        self.assertEqual(command[:5], ['/usr/bin/xcrun', 'swiftc', '-O', '-framework', 'AppKit'])
+        self.assertIn('arm64-apple-macosx12.0', command)
+        self.assertIn('platforms/macos/Launcher.swift', command)
+        self.assertEqual(command[command.index('-o') + 1], os.path.relpath(destination, payload))
+        self.assertEqual(command[command.index('-file-prefix-map') + 1], str(payload) + '=.')
+        self.assertEqual(options['cwd'], payload)
+        self.assertNotIn('shell', options)
+        self.assertTrue(options['capture_output'])
+
+    def test_native_compile_failure_leaves_no_partial_app(self):
+        self.compiler.side_effect = build.PackageError('native_launcher_compile_failed')
+        with self.assertRaisesRegex(build.PackageError, 'native_launcher_compile_failed'):
+            build.build_app(self.root / 'app.app', _source_root=self.source)
+        self.assertFalse((self.root / 'app.app').exists())
+        self.assertFalse(list(self.root.glob('.codex-usage-bar-build-*')))
+
+    def test_compiler_errors_are_sanitized(self):
+        for failure, code in ((FileNotFoundError('private path'), 'apple_swift_compiler_required'),
+                              (subprocess.TimeoutExpired('private path', 120),
+                               'native_launcher_compile_timeout')):
+            with self.subTest(error=code), patch.object(build.subprocess, 'run', side_effect=failure):
+                with self.assertRaisesRegex(build.PackageError, '^' + code + '$'):
+                    REAL_COMPILER(self.source, self.root / 'output', self.root / 'cache')
+        with patch.object(build.subprocess, 'run') as run:
+            run.return_value.returncode = 1
+            run.return_value.stderr = b'compiler diagnostic with private paths'
+            with self.assertRaisesRegex(build.PackageError, '^native_launcher_compile_failed$'):
+                REAL_COMPILER(self.source, self.root / 'output', self.root / 'cache')
+
+    def test_native_output_rejects_shell_missing_or_symlink(self):
+        def shell_output(payload, destination, cache):
+            destination.write_text('#!/bin/zsh\nexit 0\n')
+        def symlink_output(payload, destination, cache):
+            destination.symlink_to(self.source / 'README.md')
+        for action, code in ((shell_output, 'native_launcher_not_macho'),
+                             (lambda *args: None, 'native_launcher_output_missing'),
+                             (symlink_output, 'symlink_path_refused')):
+            with self.subTest(error=code):
+                self.compiler.side_effect = action
+                with self.assertRaisesRegex(build.PackageError, code):
+                    build.build_app(self.root / 'app.app', _source_root=self.source)
+                self.assertFalse((self.root / 'app.app').exists())
 
     @unittest.skipUnless(shutil.which('zsh'), 'zsh is required to exercise macOS launchers')
     def test_launchers_dispatch_to_daily_or_explicit_isolated_mode(self):
@@ -192,7 +271,8 @@ class PackagingTests(unittest.TestCase):
             build.build_app(self.root / 'app.app', _source_root=self.source)
 
     def test_license_and_provenance_are_required(self):
-        for relative in ('README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md', 'web/asset-manifest.json'):
+        for relative in ('README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
+                         'web/asset-manifest.json', 'platforms/macos/Launcher.swift'):
             path = self.source / relative
             data = path.read_bytes()
             path.unlink()
@@ -312,6 +392,18 @@ class PackagingTests(unittest.TestCase):
                 self.installer.install()
         self.assertEqual(self.installer.receipt_path.read_bytes(), old_receipt)
         self.assertEqual((self.installer.app / 'Contents/Resources/codex-usage-bar/web/bar.js').read_bytes(), old_asset)
+
+    def test_failed_compilation_preserves_installed_app_and_receipt(self):
+        self.installer.install()
+        old_receipt = self.installer.receipt_path.read_bytes()
+        launcher = self.installer.app / 'Contents/MacOS/codex-usage-bar'
+        old_launcher = launcher.read_bytes()
+        self.compiler.side_effect = build.PackageError('native_launcher_compile_failed')
+        with self.assertRaisesRegex(build.PackageError, 'native_launcher_compile_failed'):
+            self.installer.install()
+        self.assertEqual(launcher.read_bytes(), old_launcher)
+        self.assertEqual(self.installer.receipt_path.read_bytes(), old_receipt)
+        self.assertFalse(self.installer.backups.exists())
 
     def test_forged_receipt_target_is_refused(self):
         self.installer.install()

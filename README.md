@@ -1,6 +1,6 @@
 # codex-usage-bar
 
-Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.5.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.6.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
 
 > **在日常 Codex 的原生输入框上方显示额度，首页和会话页面都可使用。** 继续使用原有账号、历史、设置和项目；输入文字、输入法组合输入和进入会话不再主动卸载横条。它是原版 Codex 的启动伴侣，不修改官方应用安装包。
 >
@@ -8,9 +8,9 @@ Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 
 
 ## 安装并在日常 Codex 使用
 
-需要官方 `/Applications/Codex.app`、已有 Python 3.12+，以及已经使用过的默认资料目录：`~/.codex` 和 `~/Library/Application Support/Codex`。本版不支持自定义资料路径；不复制登录、创建替代账号或要求重新登录。
+运行需要官方 `/Applications/Codex.app`、已有 Python 3.12+，以及已经使用过的默认资料目录：`~/.codex` 和 `~/Library/Application Support/Codex`。本版不支持自定义资料路径；不复制登录、创建替代账号或要求重新登录。
 
-解压源码包，在源码目录执行：
+从源码构建还需要已有 Xcode 或 Command Line Tools（`xcrun swiftc`）；不自动下载或安装编译器。解压源码包，在源码目录执行：
 
 ```sh
 python3 platforms/macos/install.py
@@ -22,13 +22,15 @@ python3 platforms/macos/install.py
 open "$HOME/Applications/codex-usage-bar.app"
 ```
 
-启动器会打开一个终端。如果日常 Codex 本来就是由本启动器打开，信息栏会验证进程身份后重连，无需重启 Codex，也不会再开第二个实例。如果日常 Codex 是直接从官方图标打开，先保存工作、等待运行任务结束，然后 **Cmd-Q 正常退出 Codex**；启动器会等待其退出，再用原资料重新打开同一份官方应用。保持终端运行，即可在兼容的首页或会话输入框上方查看额度，无需清空输入或退出当前会话。
+启动后静默在后台刷新，**不开终端，不弹控制窗口**，额度条留在日常 Codex 输入框上方。macOS 顶部的 **“额度”** 菜单提供状态、停止、重新启动及退出入口；正常使用无需操作菜单。
 
-以后通过 **codex-usage-bar.app** 打开日常 Codex。直接从官方 Codex 图标冷启动，不会自动加上信息栏需要的调试参数；此时需先正常退出，再用本启动器打开。不会添加开机自启动，也不替换系统 Dock 项目或官方 Codex 文件。
+如果当前 Codex 已由本启动器打开，会直接重连。若是从官方图标普通启动，菜单会显示等待状态，并提示先保存工作、正常退出 Codex；启动器会用原资料重新打开。不会强制结束日常任务。
 
-**退出行为：** 在启动器终端按 `Ctrl-C` 只移除信息栏并停止其额度刷新，日常 Codex 继续运行。要关闭本地调试端口，请正常退出 Codex（Cmd-Q）。从启动器打开的本地调试端口仅监听 `127.0.0.1`；它仍具有调试能力，不能向不可信程序开放。信息栏出错时也不会杀掉日常任务。
+以后通过 **codex-usage-bar.app** 打开日常 Codex。普通官方图标冷启动不会自动加上额度条需要的调试参数。应用不添加开机自启，不替换 Dock 图标或官方 Codex 文件。
 
-这是未签名、未公证的本机源码启动器，需要外部 Python 与 Codex。安装不下载依赖、不改签名、不绕过 Gatekeeper、不添加自启动项或新的系统敏感权限。
+**停止与退出：** 在菜单栏“额度”选择停止或退出，只会要求自身启动的管理器清理横条，日常 Codex 继续运行。清理失败会明确提示，不会强退 Codex。要关闭本机调试端口，请正常退出 Codex（Cmd-Q）。端口仅监听 `127.0.0.1`，不能向不可信程序开放。
+
+这是未经开发者签名和公证的本机应用，需要外部 Python 与 Codex；构建产物可能有编译器生成的临时签名。安装不下载依赖、不改 Codex 签名、不绕过 Gatekeeper、不添加自启动或新的系统敏感权限。
 
 ## 当前能力与限制
 
@@ -56,7 +58,7 @@ python3 -B -m codex_bar daily-status
 
 ## 升级、卸载与恢复
 
-先在信息栏所属终端按 Ctrl-C，使管理器退出。安装器发现管理器锁被占用时会拒绝覆盖。重新运行安装命令升级；旧 `.app` 会保留在 `~/Applications/.codex-usage-bar-backups/`，原有资料不迁移。
+先在菜单栏“额度”选择退出，使伴侣应用和管理器结束。旧版外部终端入口使用 Ctrl-C 退出。安装器发现管理器锁被占用时会拒绝覆盖。重新运行安装命令升级；旧 `.app` 会保留在 `~/Applications/.codex-usage-bar-backups/`，原有资料不迁移。
 
 从保留的源码目录卸载：
 
@@ -76,9 +78,9 @@ python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
 node --test tests/test_frontend.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.5.0-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.6.0-source.zip
 ```
 
-构建只复制白名单文件，拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 是原创前端，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
+构建只使用白名单源文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 是原创前端，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
 
 本项目独立于 OpenAI。自有代码与原创视觉资源采用 [MIT License](LICENSE)，来源范围见 [PROVENANCE](docs/PROVENANCE.md) 和 [NOTICE](NOTICE.md)。不分发或重新授权 Codex、Python、系统组件或早期参考软件。

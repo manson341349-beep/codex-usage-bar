@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a source-only macOS wrapper; no downloads, credentials, or signing changes."""
+"""Build a native macOS launcher from allowlisted source; no dependency downloads."""
 from __future__ import annotations
 
 import argparse
@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import plistlib
 import re
 import shutil
 import stat
+import subprocess
 import tempfile
 import zipfile
 
@@ -25,7 +27,8 @@ PAYLOAD_FILES = (
     'codex_bar/__init__.py', 'codex_bar/__main__.py', 'codex_bar/manager.py',
     'codex_bar/host.py', 'codex_bar/daily_host.py', 'codex_bar/cdp.py', 'codex_bar/quota.py',
     'web/bar.js', 'web/bar.css', 'web/adaptive.js', 'web/asset-manifest.json',
-    'platforms/macos/Start.command', 'platforms/macos/Test.command', 'platforms/macos/install.py',
+    'platforms/macos/Launcher.swift', 'platforms/macos/Start.command',
+    'platforms/macos/Test.command', 'platforms/macos/install.py',
     'platforms/macos/build.py', 'README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
     'docs/VALIDATION.md',
 )
@@ -39,11 +42,10 @@ SOURCE_EXTRA_FILES = (
 OPTIONAL_SOURCE_FILES = (
     'tests/test_assets.py',
 )
-APP_LAUNCHER = '''#!/bin/zsh
-set -eu
-script_dir=${0:A:h}
-exec /usr/bin/open -a Terminal "$script_dir/../Resources/codex-usage-bar/platforms/macos/Start.command"
-'''
+NATIVE_SOURCE = 'platforms/macos/Launcher.swift'
+MACHO_MAGICS = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
+                b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca',
+                b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
 
 
 class PackageError(RuntimeError):
@@ -110,6 +112,51 @@ def release_files(root: Path, *, source=False) -> list[str]:
         files.extend(SOURCE_EXTRA_FILES)
         files.extend(name for name in OPTIONAL_SOURCE_FILES if (root / name).exists())
     return files
+
+
+def compile_native_launcher(payload: Path, destination: Path, cache: Path) -> None:
+    """Compile only copied release source, using the installed Apple toolchain."""
+    architecture = platform.machine()
+    if architecture not in ('arm64', 'x86_64'):
+        raise PackageError('unsupported_macos_build_architecture')
+    # Relative source paths and prefix maps avoid putting local source/account paths
+    # in the distributed executable. No debug information is requested.
+    command = ['/usr/bin/xcrun', 'swiftc', '-O', '-framework', 'AppKit',
+               '-target', architecture + '-apple-macosx12.0',
+               '-module-cache-path', str(cache),
+               '-file-prefix-map', str(payload) + '=.',
+               '-debug-prefix-map', str(payload) + '=.',
+               NATIVE_SOURCE, '-o', os.path.relpath(destination, payload)]
+    try:
+        result = subprocess.run(command, cwd=payload, capture_output=True, timeout=120,
+                                check=False)
+    except FileNotFoundError as exc:
+        raise PackageError('apple_swift_compiler_required') from exc
+    except subprocess.TimeoutExpired as exc:
+        raise PackageError('native_launcher_compile_timeout') from exc
+    if result.returncode:
+        # Compiler output may contain local paths; do not put it into release logs.
+        raise PackageError('native_launcher_compile_failed')
+
+
+def native_launcher_manifest(payload: Path, launcher: Path) -> dict:
+    """Verify compiler output is a local regular Mach-O file, then record its hash."""
+    reject_symlink_components(launcher)
+    try:
+        info = launcher.lstat()
+    except FileNotFoundError as exc:
+        raise PackageError('native_launcher_output_missing') from exc
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.getuid()):
+        raise PackageError('unsafe_native_launcher_output')
+    data = launcher.read_bytes()
+    if data[:4] not in MACHO_MAGICS:
+        raise PackageError('native_launcher_not_macho')
+    launcher.chmod(0o755)
+    return {'path': 'Contents/MacOS/' + PRODUCT, 'format': 'Mach-O',
+            'sha256': hashlib.sha256(data).hexdigest(), 'source': NATIVE_SOURCE,
+            'sourceSha256': hashlib.sha256(payload_bytes(payload, NATIVE_SOURCE)).hexdigest(),
+            'minimumMacOSVersion': '12.0'}
 
 
 def build_source_archive(destination: Path, *, _source_root: Path = SOURCE_ROOT) -> dict:
@@ -179,13 +226,13 @@ def build_app(destination: Path, *, _source_root: Path = SOURCE_ROOT) -> dict:
             manifest['files'].append({'path': relative, 'sha256': hashlib.sha256(data).hexdigest(),
                                       'mode': oct(mode)})
         launcher = app / 'Contents' / 'MacOS' / PRODUCT
-        launcher.write_text(APP_LAUNCHER, encoding='utf-8')
-        launcher.chmod(0o755)
+        compile_native_launcher(payload, launcher, staging / '.swift-module-cache')
+        manifest['nativeLauncher'] = native_launcher_manifest(payload, launcher)
         plist = {'CFBundleName': PRODUCT, 'CFBundleDisplayName': PRODUCT,
                  'CFBundleIdentifier': BUNDLE_ID, 'CFBundleExecutable': PRODUCT,
                  'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version,
                  'CFBundleVersion': version, 'LSUIElement': True,
-                 'NSHighResolutionCapable': True}
+                 'NSHighResolutionCapable': True, 'LSMinimumSystemVersion': '12.0'}
         (app / 'Contents' / 'Info.plist').write_bytes(plistlib.dumps(plist, sort_keys=True))
         (resources / MARKER_NAME).write_text(json.dumps(MARKER, indent=2) + '\n', encoding='utf-8')
         (resources / 'payload-manifest.json').write_text(
@@ -219,7 +266,7 @@ def main(argv=None) -> int:
     except (PackageError, OSError) as exc:
         print('Build refused: ' + str(exc))
         return 1
-    print('Unsigned local source wrapper; no notarization or Gatekeeper bypass is included.')
+    print('Local native launcher; no notarization or Gatekeeper bypass is included.')
     return 0
 
 
