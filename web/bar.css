@@ -21,6 +21,7 @@
   --cbu-accent: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-accent)));
   --cbu-mint: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-mint)));
   --cbu-ink: var(--app-color-text-on-accent, var(--cbu-fallback-ink));
+  --cbu-outline: var(--app-color-text-foreground, var(--cbu-fallback-ink));
   --cbu-eye: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-eye)));
   --cbu-highlight: var(--app-color-text-on-accent, var(--cbu-fallback-highlight));
   --cbu-heart-color: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-heart-color)));

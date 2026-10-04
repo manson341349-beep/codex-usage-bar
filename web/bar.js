@@ -17,18 +17,18 @@
   var robot = '<svg viewBox="0 0 64 64" fill="none" aria-hidden="true" focusable="false">' +
     '<ellipse cx="32" cy="58" rx="17" ry="3" fill="currentColor" opacity=".08"/>' +
     '<g class="cbu-robot">' +
-    '<path d="M29 15V10c0-2 1-3 3-3" stroke="var(--cbu-ink)" stroke-width="2.5" stroke-linecap="round"/>' +
-    '<circle cx="34" cy="7" r="3.3" fill="var(--cbu-mint)" stroke="var(--cbu-ink)" stroke-width="1.8"/>' +
-    '<path d="M21 48v5c0 2-2 3-4 3h-2" stroke="var(--cbu-ink)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path d="M42 48v5c0 2 2 3 4 3h2" stroke="var(--cbu-ink)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path d="M16 31c-5 0-7 4-6 8l1 3" stroke="var(--cbu-ink)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path class="cbu-arm" d="M48 32c5 0 7-4 6-8l-1-3" stroke="var(--cbu-ink)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path d="M32 14c-11 0-18 7-18 18v8c0 10 7 15 18 15s18-5 18-15v-8c0-11-7-18-18-18Z" fill="var(--cbu-mint)" stroke="var(--cbu-ink)" stroke-width="2"/>' +
+    '<path d="M29 15V10c0-2 1-3 3-3" stroke="var(--cbu-outline)" stroke-width="2.5" stroke-linecap="round"/>' +
+    '<circle cx="34" cy="7" r="3.3" fill="var(--cbu-mint)" stroke="var(--cbu-outline)" stroke-width="1.8"/>' +
+    '<path d="M21 48v5c0 2-2 3-4 3h-2" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
+    '<path d="M42 48v5c0 2 2 3 4 3h2" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
+    '<path d="M16 31c-5 0-7 4-6 8l1 3" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
+    '<path class="cbu-arm" d="M48 32c5 0 7-4 6-8l-1-3" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
+    '<path d="M32 14c-11 0-18 7-18 18v8c0 10 7 15 18 15s18-5 18-15v-8c0-11-7-18-18-18Z" fill="var(--cbu-mint)" stroke="var(--cbu-outline)" stroke-width="2"/>' +
     '<path d="M19 24c2-4 6-6 11-6" stroke="var(--cbu-highlight)" stroke-width="2.2" stroke-linecap="round"/>' +
     '<path d="M32 23c-9 0-13 3-13 10v3c0 6 5 9 13 9s13-3 13-9v-3c0-7-4-10-13-10Z" fill="var(--cbu-ink)"/>' +
     '<g class="cbu-eyes" stroke="var(--cbu-eye)" stroke-width="3" stroke-linecap="round"><path d="M26 32v4"/><path d="M38 32v4"/></g>' +
     '<path d="M29 40c2 1.4 4 1.4 6 0" stroke="var(--cbu-eye)" stroke-width="1.3" stroke-linecap="round"/>' +
-    '<path d="M28 49h8" stroke="var(--cbu-ink)" stroke-opacity=".22" stroke-width="2" stroke-linecap="round"/>' +
+    '<path d="M28 49h8" stroke="var(--cbu-outline)" stroke-opacity=".22" stroke-width="2" stroke-linecap="round"/>' +
     '</g><path class="cbu-heart" d="M52 15c-7-4-7-8-4-9 2-1 4 0 4 2 1-2 3-3 5-2 3 2 1 6-5 9Z" fill="var(--cbu-heart-color)"/></svg>';
 
   function element(document, tag, className, text) {
