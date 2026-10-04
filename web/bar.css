@@ -1,16 +1,29 @@
 /* MIT License — Copyright (c) 2026 codex-usage-bar contributors */
 .cbu-bar {
-  --cbu-surface: #fbfdfa;
-  --cbu-border: #dce7df;
-  --cbu-text: #223b34;
-  --cbu-muted: #74867e;
-  --cbu-soft: #e9f0eb;
-  --cbu-accent: #77af96;
-  --cbu-mint: #bde5cc;
-  --cbu-ink: #25483e;
-  --cbu-eye: #c9f1dc;
-  --cbu-highlight: #edfff3;
-  --cbu-heart-color: #de9b9d;
+  --cbu-fallback-surface: #fbfdfa;
+  --cbu-fallback-border: #dce7df;
+  --cbu-fallback-text: #223b34;
+  --cbu-fallback-muted: #74867e;
+  --cbu-fallback-soft: #e9f0eb;
+  --cbu-fallback-accent: #77af96;
+  --cbu-fallback-mint: #bde5cc;
+  --cbu-fallback-ink: #25483e;
+  --cbu-fallback-eye: #c9f1dc;
+  --cbu-fallback-highlight: #edfff3;
+  --cbu-fallback-heart-color: #de9b9d;
+  /* Codex derives these inherited variables from the user's surface, ink,
+     accent and contrast settings. CSS updates directly when that theme changes. */
+  --cbu-surface: var(--app-color-background-surface, var(--cbu-fallback-surface));
+  --cbu-border: var(--app-color-border, var(--cbu-fallback-border));
+  --cbu-text: var(--app-color-text-foreground, var(--cbu-fallback-text));
+  --cbu-muted: var(--app-color-text-foreground-secondary, var(--cbu-fallback-muted));
+  --cbu-soft: var(--app-color-background-button-secondary-hover, var(--cbu-fallback-soft));
+  --cbu-accent: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-accent)));
+  --cbu-mint: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-mint)));
+  --cbu-ink: var(--app-color-text-on-accent, var(--cbu-fallback-ink));
+  --cbu-eye: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-eye)));
+  --cbu-highlight: var(--app-color-text-on-accent, var(--cbu-fallback-highlight));
+  --cbu-heart-color: var(--codex-base-accent, var(--app-color-accent-blue, var(--cbu-fallback-heart-color)));
   box-sizing: border-box;
   width: 100%;
   min-width: 320px;
@@ -18,7 +31,8 @@
   background: var(--cbu-surface);
   border: 1px solid var(--cbu-border);
   border-radius: 22px;
-  box-shadow: 0 8px 28px #1f453b0a, 0 1px 3px #1f453b04;
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--cbu-text) 4%, transparent),
+    0 1px 3px color-mix(in srgb, var(--cbu-text) 2%, transparent);
   font: 12px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -26,32 +40,32 @@
 }
 .cbu-bar *, .cbu-bar *::before, .cbu-bar *::after { box-sizing: border-box; }
 .cbu-bar[data-theme="dark"] {
-  --cbu-surface: #1c2925;
-  --cbu-border: #35493f;
-  --cbu-text: #e2efe5;
-  --cbu-muted: #93ab9d;
-  --cbu-soft: #30443a;
-  --cbu-accent: #9bc9ae;
-  --cbu-mint: #b5dec4;
-  --cbu-ink: #23483c;
-  --cbu-eye: #d8f5e2;
-  --cbu-highlight: #e1f5e5;
-  --cbu-heart-color: #efb0b1;
+  --cbu-fallback-surface: #1c2925;
+  --cbu-fallback-border: #35493f;
+  --cbu-fallback-text: #e2efe5;
+  --cbu-fallback-muted: #93ab9d;
+  --cbu-fallback-soft: #30443a;
+  --cbu-fallback-accent: #9bc9ae;
+  --cbu-fallback-mint: #b5dec4;
+  --cbu-fallback-ink: #23483c;
+  --cbu-fallback-eye: #d8f5e2;
+  --cbu-fallback-highlight: #e1f5e5;
+  --cbu-fallback-heart-color: #efb0b1;
   color-scheme: dark;
 }
 @media (prefers-color-scheme: dark) {
   .cbu-bar[data-theme="auto"] {
-    --cbu-surface: #1c2925;
-    --cbu-border: #35493f;
-    --cbu-text: #e2efe5;
-    --cbu-muted: #93ab9d;
-    --cbu-soft: #30443a;
-    --cbu-accent: #9bc9ae;
-    --cbu-mint: #b5dec4;
-    --cbu-ink: #23483c;
-    --cbu-eye: #d8f5e2;
-    --cbu-highlight: #e1f5e5;
-    --cbu-heart-color: #efb0b1;
+    --cbu-fallback-surface: #1c2925;
+    --cbu-fallback-border: #35493f;
+    --cbu-fallback-text: #e2efe5;
+    --cbu-fallback-muted: #93ab9d;
+    --cbu-fallback-soft: #30443a;
+    --cbu-fallback-accent: #9bc9ae;
+    --cbu-fallback-mint: #b5dec4;
+    --cbu-fallback-ink: #23483c;
+    --cbu-fallback-eye: #d8f5e2;
+    --cbu-fallback-highlight: #e1f5e5;
+    --cbu-fallback-heart-color: #efb0b1;
     color-scheme: dark;
   }
 }

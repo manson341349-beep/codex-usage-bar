@@ -1,6 +1,6 @@
 # codex-usage-bar
 
-Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.7.1，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.7.2，macOS**；统一仓库为未来 Windows 实现保留平台目录。
 
 > **在日常 Codex 的原生输入框上方显示额度，首页和会话页面都可使用。** 继续使用原有账号、历史、设置和项目；输入文字、输入法组合输入和进入会话不再主动卸载横条。它是原版 Codex 的启动伴侣，不修改官方应用安装包。
 >
@@ -38,6 +38,7 @@ open "$HOME/Applications/codex-usage-bar.app"
 - 经官方 CLI 的只读 `account/read` 和 `account/rateLimits/read` 获取订阅额度，约每 60 秒刷新。每周订阅显示**剩余百分比**（100% − 官方已用比例），数字与进度条口径一致；5 小时仍显示已用比例。
 - 5h 或每周窗口缺失、身份不明、数据过期或待重置时明确显示未知/状态；**缺数据不表示无限制**。没有账户绑定的“用户确认无限制”设置。
 - 缓存命中来自 Codex 已有的会话统计通知，按当前会话累计缓存输入 token ÷ 累计输入 token 计算；折叠行也保留缓存读数。仅匹配当前输入框的会话 UUID 与侧栏主机标识；两者缺失、冲突或计数无效时显示未知/等待，切换时立即清掉旧统计。初次接入、页面刷新或切换到其他会话后，需要下一条真实统计通知才显示；不回读历史日志。超过两分钟无新通知会标为“上次统计”。这不是上下文占用率，也不等于全账户缓存命中率。
+- 外观直接继承 Codex 当前主题的背景、文字、边框及强调色；进度条和 Milo 随强调色变化。切换明暗或自定义配色时通过 CSS 自动更新，无需重启。宿主主题变量不可用时回退到内置明暗配色；这些变量属于 Codex 内部接口。
 - 真实工作事件仍未接入。Milo 动画不表示模型正在生成。
 - 箭头可折叠为单行额度摘要，再次点击展开；点击 `i` 查看来源说明，再次点击、点击外部或按 Esc 关闭。鼠标经过或键盘聚焦不再自动展开详情。动画尊重减少动态效果；不承诺 GPU 稳定 60 fps。
 - 日常模式支持同一已验证实例中的多个 Codex 应用页面，并在页面重载或输入框被替换后重新挂载。仅支持默认资料路径；不主动切换会话、导航页面或发送消息。
@@ -79,7 +80,7 @@ python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
 node --test tests/test_frontend.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.7.1-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.7.2-source.zip
 ```
 
 构建只使用白名单源文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 是原创前端，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
