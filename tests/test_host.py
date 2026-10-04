@@ -182,6 +182,8 @@ class HostTests(unittest.TestCase):
 
     def test_reject_nonprivate_state(self):
         (self.project / '.state').mkdir(mode=0o755)
+        # mkdir's mode is filtered by the caller's umask (daily launcher: 077).
+        (self.project / '.state').chmod(0o755)
         with self.assertRaisesRegex(HostError, 'state_directory_not_private'):
             with self.host():
                 pass

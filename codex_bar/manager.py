@@ -53,10 +53,17 @@ def read_assets(root: Path = PROJECT_ROOT) -> dict[str, str]:
         raise ManagerError('assets_unavailable') from exc
 
 
-def install_expression(assets: dict[str, str], token: str) -> str:
+def install_expression(assets: dict[str, str], token: str, *, home_only=True) -> str:
     # JSON quoting is for JavaScript literals here, never shell interpolation.
     return """(() => {
       const key=Symbol.for(%s), token=%s;
+      if(location.protocol!=='app:' || location.host!=='-')
+        return {installed:false, reason:'application-origin-required'};
+      const previous=window[key];
+      if(previous && previous.token===token && previous.api &&
+         window.CodexUsageBar===previous.barExport &&
+         window.CodexUsageBarAdapter===previous.adaptiveExport)
+        return {installed:true, reused:true};
       if(window[key] || window.CodexUsageBar || window.CodexUsageBarAdapter)
         return {installed:false, reason:'existing-information-bar'};
       const owned={token, api:null, barExport:null, adaptiveExport:null}; window[key]=owned;
@@ -65,7 +72,7 @@ def install_expression(assets: dict[str, str], token: str) -> str:
         %s
         owned.barExport=window.CodexUsageBar;
         owned.adaptiveExport=window.CodexUsageBarAdapter;
-        owned.api=window.CodexUsageBarAdapter.install({css:%s, homeOnly:true});
+        owned.api=window.CodexUsageBarAdapter.install({css:%s, homeOnly:%s});
         return {installed:true};
       } catch (_) {
         if (owned.api) { try { owned.api.dispose(); } catch (_) {} }
@@ -74,11 +81,12 @@ def install_expression(assets: dict[str, str], token: str) -> str:
         return {installed:false, reason:'mount-failed'};
       }
     })()""" % (json.dumps(BRIDGE_KEY), json.dumps(token), assets['bar.js'],
-                assets['adaptive.js'], json.dumps(assets['bar.css']))
+                assets['adaptive.js'], json.dumps(assets['bar.css']), json.dumps(home_only))
 
 
 def owned_expression(token: str, body: str) -> str:
     return """(() => { const h=window[Symbol.for(%s)];
+      if(location.protocol!=='app:' || location.host!=='-') return {owned:false};
       if(!h || h.token!==%s || !h.api) return {owned:false};
       %s
     })()""" % (json.dumps(BRIDGE_KEY), json.dumps(token), body)
@@ -86,11 +94,12 @@ def owned_expression(token: str, body: str) -> str:
 
 class Renderer:
     """Only own bridge results are returned; no DOM text, screenshots or titles."""
-    def __init__(self, session, page, *, token=None):
+    def __init__(self, session, page, *, token=None, home_only=True):
         self.session = session
         self.page = page
         self.token = token or secrets.token_hex(16)
         self.installed = False
+        self.home_only = home_only
 
     def evaluate(self, expression: str):
         reply = self.session.call('Runtime.evaluate', {
@@ -105,7 +114,7 @@ class Renderer:
         return value
 
     def install(self, assets):
-        result = self.evaluate(install_expression(assets, self.token))
+        result = self.evaluate(install_expression(assets, self.token, home_only=self.home_only))
         if result.get('installed') is not True:
             raise ManagerError('renderer_install_refused')
         self.installed = True
@@ -146,9 +155,152 @@ class Renderer:
           return {owned:true,removed:absent};
         """ % (json.dumps(BRIDGE_KEY), json.dumps(BRIDGE_KEY))))
         self.installed = False
+        if result.get('owned') is False:
+            # Reload or a replacement bridge removed our token. Never remove
+            # anything belonging to a different manager in order to clean up.
+            return False
         if result.get('removed') is not True:
             raise ManagerError('renderer_cleanup_unverified')
         return True
+
+
+class RendererCollection:
+    """Manage daily windows independently, using only opaque target IDs.
+
+    Target discovery and quota heartbeats are bounded by the manager's timer.
+    A target failure backs off independently; transport failures are reconnected
+    on the next heartbeat. Ownership tokens survive transport reconnects so a
+    bridge already installed by this manager is reused instead of replaced.
+    """
+    def __init__(self, port, validate, assets):
+        self.port, self.validate, self.assets = port, validate, assets
+        self.session = None
+        self.targets = {}
+
+    def _connect(self):
+        if self.session is None or self.session.closed:
+            if self.session is not None:
+                self.session.close()
+            self.session = BrowserSession.connect(self.port, self.validate)
+            for state in self.targets.values():
+                state['renderer'] = None
+
+    def _renderer(self, target_id, state):
+        if state['renderer'] is None:
+            page = self.session.attach_codex_target(target_id)
+            state['renderer'] = Renderer(self.session, page, token=state['token'], home_only=False)
+        return state['renderer']
+
+    def _detach(self, state):
+        renderer = state['renderer']
+        if renderer is not None:
+            try:
+                self.session.detach_page(renderer.page)
+            except CDPError:
+                pass  # Closing targets have already discarded their sessions.
+            state['renderer'] = None
+
+    def sync(self, snapshot, *, now=None):
+        now = time.monotonic() if now is None else now
+        self._connect()
+        ids = self.session.list_codex_pages()
+        for absent in set(self.targets).difference(ids):
+            state = self.targets.pop(absent)
+            self._detach(state)
+        result = {'pages': len(ids), 'mounted': 0, 'visible': 0, 'unavailable': 0}
+        for index, target_id in enumerate(ids):
+            state = self.targets.setdefault(target_id, {'token': secrets.token_hex(16),
+                         'renderer': None, 'failures': 0, 'next_attempt': 0.0})
+            if now < state['next_attempt']:
+                result['unavailable'] += 1
+                continue
+            try:
+                renderer = self._renderer(target_id, state)
+                if not renderer.installed:
+                    renderer.install(self.assets)
+                try:
+                    layout = renderer.update(snapshot)
+                except ManagerError as error:
+                    if str(error) not in ('renderer_bridge_lost', 'renderer_update_refused'):
+                        raise
+                    # Reload clears the bridge. A disposed owned adapter can
+                    # also be rebuilt, but foreign bridges are never adopted.
+                    if str(error) == 'renderer_update_refused':
+                        renderer.dispose()
+                    renderer.installed = False
+                    renderer.install(self.assets)
+                    layout = renderer.update(snapshot)
+                state.update(failures=0, next_attempt=0.0)
+                result['mounted'] += int(layout.get('mounted') is True)
+                result['visible'] += int(layout.get('visible') is True)
+            except (CDPError, ManagerError):
+                state['failures'] = min(state['failures'] + 1, 5)
+                state['next_attempt'] = now + min(60, 5 * 2 ** (state['failures'] - 1))
+                result['unavailable'] += 1
+                # Remove our own unsafe/disposed UI when the window is still
+                # reachable. The next attempt will get a fresh target session.
+                renderer = state['renderer']
+                if renderer is not None and renderer.installed and not self.session.closed:
+                    try:
+                        renderer.dispose()
+                    except (CDPError, ManagerError):
+                        pass
+                self._detach(state)
+                if self.session.closed:
+                    # Do not issue more requests on a failed transport. Other
+                    # pages are preserved and reattached at the next heartbeat.
+                    result['unavailable'] += len(ids) - index - 1
+                    break
+        return result
+
+    def dispose(self):
+        if not self.targets:
+            return
+        self._connect()
+        ids = self.session.list_codex_pages()
+        failed = False
+        reconnected = False
+        pending = list(self.targets)
+        while pending:
+            target_id = pending.pop(0)
+            if target_id not in ids:
+                continue
+            state = self.targets[target_id]
+            try:
+                renderer = self._renderer(target_id, state)
+                # Reconnected renderers may still have an owned bridge.
+                # Only check the original token; never reinstall here.
+                renderer.installed = True
+                renderer.dispose()
+            except (CDPError, ManagerError):
+                recovered = False
+                try:
+                    if self.session.closed:
+                        if reconnected:
+                            raise ManagerError('daily_renderer_cleanup_unverified')
+                        reconnected = True
+                        self._connect()
+                        recovered = True
+                    ids = self.session.list_codex_pages()
+                except (CDPError, ManagerError):
+                    failed = True
+                    continue
+                if target_id not in ids:
+                    continue  # The user closed this window during cleanup.
+                if recovered:
+                    # Give surviving windows the recovered transport first.
+                    # A persistently unresponsive target must not consume that
+                    # only recovery before the healthy windows can be cleaned.
+                    pending.append(target_id)
+                else:
+                    failed = True
+        if failed:
+            raise ManagerError('daily_renderer_cleanup_unverified')
+        self.targets.clear()
+
+    def close(self):
+        if self.session is not None:
+            self.session.close()
 
 
 @contextmanager
@@ -257,18 +409,13 @@ def run_daily(*, duration=0, wait_for_exit=False):
             print('已取消等待；日常 Codex 未改变。', flush=True)
             return
 
-        session = renderer = executor = future = None
+        renderers = executor = future = None
         cleanup_failed = False
         try:
-            session = BrowserSession.connect(endpoint.port, host.validate)
-            # Daily Codex may restore a conversation. Attach only to its one
-            # canonical app origin; the adapter still mounts ONLY at empty home.
-            page = session.attach_codex_page(allow_application_routes=True)
-            renderer = Renderer(session, page)
-            renderer.install(assets)
+            renderers = RendererCollection(endpoint.port, host.validate, assets)
             bridge = QuotaBridge(CodexQuotaClient(codex_home=host.quota_home))
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='quota')
-            print('已接入日常 Codex，沿用原资料。空白首页显示信息栏；输入/对话页卸载。Ctrl-C 仅关闭信息栏，Cmd-Q 退出 Codex。', flush=True)
+            print('日常额度条管理器已启动。会在兼容的首页和会话输入框上方显示；支持多窗口与页面重载。Ctrl-C 仅关闭信息栏，Cmd-Q 退出 Codex。', flush=True)
             deadline = time.monotonic() + duration if duration else None
             next_refresh = next_heartbeat = 0.0
             previous_layout = None
@@ -284,10 +431,16 @@ def run_daily(*, duration=0, wait_for_exit=False):
                 if future is None and now >= next_refresh:
                     future = executor.submit(bridge.refresh)
                 if now >= next_heartbeat:
-                    layout = renderer.update(bridge.snapshot())
-                    state = (layout.get('mounted'), layout.get('visible'))
+                    try:
+                        layout = renderers.sync(bridge.snapshot(), now=now)
+                    except CDPError:
+                        # Closed transports and changing window inventories are
+                        # retried on the next heartbeat, never in a tight loop.
+                        layout = {'mounted': 0, 'visible': 0, 'unavailable': 1}
+                    state = (layout.get('mounted'), layout.get('visible'), layout.get('unavailable'))
                     if state != previous_layout:
-                        print('日常首页横条已挂载。' if all(state) else '等待空白首页；不读取对话或输入正文。', flush=True)
+                        print('额度条已在 %d 个窗口显示；%d 个窗口等待恢复。' % (state[1], state[2])
+                              if state[1] else '等待兼容的输入框或窗口恢复；不读取对话或输入正文。', flush=True)
                         previous_layout = state
                     next_heartbeat = time.monotonic() + 5
                 time.sleep(.2)
@@ -309,14 +462,14 @@ def run_daily(*, duration=0, wait_for_exit=False):
             except Exception:
                 still_running = None
                 cleanup_failed = True
-            if renderer is not None and still_running is True:
+            if renderers is not None and still_running is True:
                 try:
-                    renderer.dispose()
+                    renderers.dispose()
                 except Exception:
                     renderer_failed = True
-            if session is not None:
+            if renderers is not None:
                 try:
-                    session.close()
+                    renderers.close()
                 except Exception:
                     cleanup_failed = True
             if executor is not None:
@@ -345,7 +498,7 @@ def run_daily(*, duration=0, wait_for_exit=False):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='codex-usage-bar：日常 Codex 首页信息栏；另保留独立测试模式。')
+    parser = argparse.ArgumentParser(description='codex-usage-bar：日常 Codex 输入框上方额度条；另保留独立测试模式。')
     parser.add_argument('command', choices=('daily', 'daily-status', 'status', 'login', 'run', 'cleanup'))
     parser.add_argument('--acknowledge-runtime', action='store_true',
                         help='仅在审阅并批准本次实际运行后使用；不是自动授权。')

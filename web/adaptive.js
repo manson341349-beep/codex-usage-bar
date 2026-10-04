@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: MIT
  * Copyright (c) 2026 Codex Usage Bar contributors
- * Original adapter: only structural home-composer inspection, never chat text.
+ * Original adapter: only structural composer inspection, never chat text.
  */
 (function () {
   'use strict';
 
-  const ROOT = '[data-codex-composer-root][data-composer-placement="home"]';
+  const ROOT = '[data-codex-composer-root]';
   const PORTAL = '[data-above-composer-portal]';
   const EDITOR = '.ProseMirror[contenteditable="true"]';
+  const PERSISTENT_EDITOR = EDITOR + ',.ProseMirror[contenteditable="false"]';
   const TURNS = '[data-content-search-turn-key],[data-turn-key]';
   const MARKER = '[data-codex-usage-bar]';
   const HEARTBEAT_MS = 15000;
@@ -93,11 +94,11 @@
       a.top < b.bottom - EPSILON && a.bottom > b.top + EPSILON;
   }
 
-  function homeURL() {
+  function supportedURL(homeOnly) {
     const url = new URL(window.location.href);
     return url.protocol === 'app:' && url.hostname === '-' && !url.port &&
-      !url.username && !url.password && (url.pathname === '/' || url.pathname === '/index.html') &&
-      !url.search && !url.hash;
+      !url.username && !url.password && (!homeOnly ||
+        ((url.pathname === '/' || url.pathname === '/index.html') && !url.search && !url.hash));
   }
 
   function ancestorChain(element) {
@@ -136,7 +137,7 @@
   }
 
   function install(options) {
-    if (!options || options.homeOnly !== true || typeof options.css !== 'string' ||
+    if (!options || typeof options.homeOnly !== 'boolean' || typeof options.css !== 'string' ||
         options.css.length > 262144) throw new Error('usage-bar-invalid-options');
     if (!window.CodexUsageBar || typeof window.CodexUsageBar.mount !== 'function' ||
         !window.MutationObserver || !window.ResizeObserver || !window.requestAnimationFrame ||
@@ -154,7 +155,8 @@
     let composingEditor = null;
     let layout = null;
     let state = 'unmounted';
-    let reason = 'waiting-for-home';
+    const homeOnly = options.homeOnly;
+    let reason = homeOnly ? 'waiting-for-home' : 'waiting-for-composer';
     let frame = null;
     let timer = null;
     let mutation = null;
@@ -191,30 +193,36 @@
     }
 
     function candidate() {
-      if (!homeURL()) return { reason: 'unsupported-route' };
-      if (document.querySelector(TURNS)) return { reason: 'conversation-present' };
+      if (!supportedURL(homeOnly)) return { reason: 'unsupported-route' };
+      if (homeOnly && document.querySelector(TURNS)) return { reason: 'conversation-present' };
       const roots = Array.from(document.querySelectorAll(ROOT)).filter(shown);
-      if (roots.length !== 1) return { reason: 'ambiguous-home' };
+      if (roots.length !== 1) return { reason: homeOnly ? 'ambiguous-home' : 'ambiguous-composer' };
       const root = roots[0];
+      const placement = root.getAttribute('data-composer-placement');
+      if (placement !== 'home' && (homeOnly || placement !== 'thread')) {
+        return { reason: 'unsupported-composer' };
+      }
       const portals = Array.from(root.children).filter(node => node.matches(PORTAL));
       if (portals.length !== 1) return { reason: 'ambiguous-portal' };
       const portal = portals[0];
       if (['absolute', 'fixed'].includes(window.getComputedStyle(portal).position)) {
         return { reason: 'unsupported-portal-flow' };
       }
-      // A populated association is always refused; no identifier is returned or retained.
-      if (portal.hasAttribute('data-above-composer-conversation-id') &&
-          portal.getAttribute('data-above-composer-conversation-id') !== '') {
+      // The isolated home-only mode rejects an association using a structural
+      // selector. Persistent mode never inspects its value or any conversation ID.
+      if (homeOnly && portal.hasAttribute('data-above-composer-conversation-id') &&
+          !portal.matches('[data-above-composer-conversation-id=""]')) {
         return { reason: 'conversation-associated' };
       }
-      const editors = root.querySelectorAll(EDITOR);
+      const editors = Array.from(root.querySelectorAll(homeOnly ? EDITOR : PERSISTENT_EDITOR))
+        .filter(node => homeOnly || shown(node));
       if (editors.length !== 1 || !shown(editors[0])) return { reason: 'ambiguous-editor' };
-      if (editors[0] === composingEditor) return { reason: 'editor-composing' };
-      if (!emptyEditor(editors[0])) return { reason: 'nonempty-editor' };
+      if (homeOnly && editors[0] === composingEditor) return { reason: 'editor-composing' };
+      if (homeOnly && !emptyEditor(editors[0])) return { reason: 'nonempty-editor' };
       if (!ancestorChain(portal)) return { reason: 'unsupported-ancestry' };
       const foreign = Array.from(document.querySelectorAll(MARKER)).some(node => node !== host);
       if (foreign) return { reason: 'ownership-conflict' };
-      return { root: root, portal: portal, editor: editors[0] };
+      return { root: root, portal: portal, editor: editors[0], placement: placement };
     }
 
     function snapshot() {
@@ -271,7 +279,9 @@
 
     function fingerprint() {
       const values = [contentRevision, layoutRevision, currentTheme, viewport()];
-      for (const node of [target.root, target.editor].concat(ancestorChain(target.portal) || [])) {
+      const nativePortalChildren = Array.from(target.portal.children).filter(node => node !== host);
+      for (const node of [target.root, target.editor].concat(
+          ancestorChain(target.portal) || [], nativePortalChildren)) {
         const style = window.getComputedStyle(node);
         values.push(rect(node), node.clientWidth, node.clientHeight, style.overflowX,
           style.overflowY, style.display, style.visibility, style.transform, style.zoom);
@@ -310,6 +320,8 @@
         }
       }
       const overlaps = overlap(bar, editor) || overlap(content, editor);
+      const portalOverlap = Array.from(target.portal.children).some(node =>
+        node !== host && shown(node) && (overlap(bar, rect(node)) || overlap(content, rect(node))));
       const inside = contained(bar, view, true, true) && contained(content, view, true, true);
       const overflow = !contained(content, bar, true, true) ||
         mounted.element.scrollWidth > mounted.element.clientWidth + 1;
@@ -318,6 +330,7 @@
       else if (unsupportedTransform) failure = 'unsupported-transform';
       else if (overflow) failure = 'content-overflow';
       else if (overlaps) failure = 'native-overlap';
+      else if (portalOverlap) failure = 'native-portal-overlap';
       else if (bar.bottom > editor.top + EPSILON) failure = 'unsupported-order';
       else if (clipped) failure = 'ancestor-clipped';
       else if (!inside) failure = 'outside-viewport';
@@ -325,7 +338,7 @@
         mode: 'native-flow', visible: failure === null, hiddenReason: failure,
         root: rect(target.root), portal: rect(target.portal), bar: bar, editor: editor,
         gapToNativeContent: editor.top - Math.max(bar.bottom, content.bottom),
-        overlapsNativeContent: overlaps, clippedByAncestor: clipped, barWithinViewport: inside,
+        overlapsNativeContent: overlaps || portalOverlap, clippedByAncestor: clipped, barWithinViewport: inside,
         reservedHeight: host.offsetHeight + 10, naturalHeight: mounted.element.offsetHeight,
         safety: { checked: true, safe: failure === null, reason: failure, clipCount: clipCount }
       };
@@ -362,7 +375,7 @@
       host.style.setProperty('visibility', 'visible', 'important');
       layout = measured;
       state = 'mounted';
-      reason = 'home-ready';
+      reason = homeOnly ? 'home-ready' : 'composer-ready';
     }
 
     function observeGeometry() {
@@ -370,6 +383,7 @@
       if (target) {
         wanted.add(target.editor);
         for (const ancestor of ancestorChain(target.portal) || []) wanted.add(ancestor);
+        for (const node of target.portal.children) if (node !== host) wanted.add(node);
       }
       for (const node of observed) {
         if (!wanted.has(node)) { resize.unobserve(node); observed.delete(node); }
@@ -404,7 +418,8 @@
       host.style.cssText = 'display:block!important;visibility:hidden!important;position:relative!important;' +
         'box-sizing:border-box!important;width:100%!important;max-width:100%!important;min-width:0!important;' +
         'height:auto!important;margin:0 0 10px!important;padding:0!important;border:0!important;' +
-        'flex:none!important;float:none!important;transform:none!important;';
+        'flex:none!important;float:none!important;transform:none!important;' +
+        'grid-column:1 / -1!important;grid-row:auto!important;align-self:stretch!important;justify-self:stretch!important;';
       const shadow = host.attachShadow({ mode: 'open' });
       const stylesheet = document.createElement('style');
       stylesheet.textContent = options.css;
@@ -431,7 +446,7 @@
         if (!next.root) { unmount(next.reason); return; }
         if (host && (!host.isConnected || host.parentElement !== next.portal || !target ||
             target.root !== next.root || target.portal !== next.portal || target.editor !== next.editor)) {
-          unmount('home-replaced');
+          unmount(homeOnly ? 'home-replaced' : 'composer-replaced');
         }
         refreshSnapshot();
         if (!host) mount(next);
@@ -495,7 +510,7 @@
       },
       inspect: function () {
         // Fixed state labels and numeric geometry only: no DOM nodes, identifiers or text.
-        return { status: state, reason: reason, homeOnly: true,
+        return { status: state, reason: reason, homeOnly: homeOnly,
           layout: layout === null ? null : JSON.parse(JSON.stringify(layout)) };
       },
       dispose: dispose
@@ -539,8 +554,10 @@
       });
       const editing = function (event) {
         if (target && (event.target === target.editor || target.editor.contains(event.target))) {
-          if (event.type === 'compositionstart') composingEditor = target.editor;
-          unmount('editor-input');
+          if (homeOnly) {
+            if (event.type === 'compositionstart') composingEditor = target.editor;
+            unmount('editor-input');
+          }
           schedule();
         }
       };
@@ -549,6 +566,7 @@
       listen(document, 'compositionstart', editing, true);
       listen(document, 'compositionend', function () {
         if (composingEditor) { composingEditor = null; schedule(); }
+        else if (!homeOnly) schedule();
       }, true);
       observeGeometry();
       timer = window.setInterval(function () {

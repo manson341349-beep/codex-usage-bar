@@ -8,8 +8,9 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from codex_bar.manager import (ASSET_NAMES, ManagerError, Renderer, main,
-                               read_assets, install_expression, run_foreground, run_daily)
+                               read_assets, install_expression, run_foreground, run_daily, RendererCollection)
 from codex_bar.host import HostError
+from codex_bar.cdp import CDPError
 
 
 class FakeSession:
@@ -41,6 +42,15 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaises(ManagerError):
             self.renderer.install(dict.fromkeys(ASSET_NAMES, '/* test */'))
         self.assertFalse(self.renderer.installed)
+
+    def test_daily_install_is_origin_guarded_and_reuses_only_matching_owner(self):
+        source = install_expression(dict.fromkeys(ASSET_NAMES, '/* fixture */'),
+                                    'our-token', home_only=False)
+        self.assertIn('homeOnly:false', source)
+        self.assertIn("location.protocol!=='app:' || location.host!=='-'", source)
+        self.assertIn('previous.token===token', source)
+        self.assertIn('window.CodexUsageBar===previous.barExport', source)
+        self.assertIn('installed:true, reused:true', source)
 
     def test_snapshot_never_forwards_thread_content_or_work_claim(self):
         self.session.value = {'owned': True, 'accepted': True, 'mounted': True, 'visible': True}
@@ -90,6 +100,12 @@ class ManagerTests(unittest.TestCase):
         self.assertTrue(self.renderer.dispose())
         self.assertIn('owned-token', self.session.calls[-1][1]['expression'])
         self.assertIn('h.api.dispose()', self.session.calls[-1][1]['expression'])
+
+    def test_cleanup_after_reload_does_not_delete_foreign_bridge(self):
+        self.renderer.installed = True
+        self.session.value = {'owned': False}
+        self.assertFalse(self.renderer.dispose())
+        self.assertFalse(self.renderer.installed)
 
     def test_remote_error_details_are_not_output(self):
         self.session.call = lambda *args, **kwargs: {'exceptionDetails': {'text':'SECRET'}}
@@ -214,6 +230,217 @@ class ManagerTests(unittest.TestCase):
         self.assertLess(clock[0],11.3)
 
 
+class RendererCollectionTests(unittest.TestCase):
+    def setUp(self):
+        self.session = MagicMock()
+        self.session.closed = False
+        self.session.list_codex_pages.return_value = ('first', 'second')
+        self.session.attach_codex_target.side_effect = lambda target: SimpleNamespace(
+            target_id=target, session_id='session-' + target)
+        self.created = []
+        def create(session, page, *, token, home_only):
+            renderer = MagicMock()
+            renderer.session, renderer.page = session, page
+            renderer.token, renderer.home_only = token, home_only
+            renderer.installed = False
+            renderer.install.side_effect = lambda _: setattr(renderer, 'installed', True)
+            renderer.dispose.side_effect = lambda: setattr(renderer, 'installed', False)
+            renderer.update.return_value = {'mounted': True, 'visible': True}
+            self.created.append(renderer)
+            return renderer
+        self.factory = patch('codex_bar.manager.Renderer', side_effect=create).start()
+        self.connect = patch('codex_bar.manager.BrowserSession.connect', return_value=self.session).start()
+        self.addCleanup(patch.stopall)
+        self.collection = RendererCollection(12345, lambda: True, {'fixture': 'owned'})
+
+    def test_all_canonical_windows_share_snapshot_but_have_independent_tokens(self):
+        snapshot = {'status': 'fresh'}
+        result = self.collection.sync(snapshot, now=0)
+        self.assertEqual(result, {'pages': 2, 'mounted': 2, 'visible': 2, 'unavailable': 0})
+        self.assertEqual(len(self.created), 2)
+        self.assertNotEqual(self.created[0].token, self.created[1].token)
+        for renderer in self.created:
+            self.assertFalse(renderer.home_only)
+            renderer.update.assert_called_once_with(snapshot)
+        self.connect.assert_called_once()
+
+    def test_new_window_attaches_and_closed_window_does_not_interrupt_survivor(self):
+        self.collection.sync({}, now=0)
+        original = self.created.copy()
+        self.session.list_codex_pages.return_value = ('second', 'third')
+        self.collection.sync({}, now=5)
+        self.assertEqual(set(self.collection.targets), {'second', 'third'})
+        self.session.detach_page.assert_called_once_with(original[0].page)
+        original[0].dispose.assert_not_called()
+        self.assertEqual(original[1].update.call_count, 2)
+        self.assertEqual(len(self.created), 3)
+
+    def test_page_reload_reinstalls_same_token_without_touching_other_window(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        first.update.side_effect = [ManagerError('renderer_bridge_lost'),
+                                   {'mounted': True, 'visible': True}]
+        result = self.collection.sync({}, now=5)
+        self.assertEqual(result['visible'], 2)
+        self.assertEqual(first.install.call_count, 2)
+        first.dispose.assert_not_called()
+        self.assertEqual(second.install.call_count, 1)
+
+    def test_frontend_rejection_rebuilds_owned_adapter_once(self):
+        self.collection.sync({}, now=0)
+        first = self.created[0]
+        first.update.side_effect = [ManagerError('renderer_update_refused'),
+                                   {'mounted': True, 'visible': True}]
+        self.assertEqual(self.collection.sync({}, now=5)['visible'], 2)
+        first.dispose.assert_called_once()
+        self.assertEqual(first.install.call_count, 2)
+
+    def test_one_target_remote_error_keeps_other_window_running(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        first.update.side_effect = CDPError('window closed')
+        result = self.collection.sync({}, now=5)
+        self.assertEqual(result['visible'], 1)
+        self.assertEqual(result['unavailable'], 1)
+        self.assertEqual(second.update.call_count, 2)
+        self.session.close.assert_not_called()
+
+    def test_foreign_bridge_is_never_disposed_and_retries_back_off(self):
+        self.session.list_codex_pages.return_value = ('first',)
+        original_factory = self.factory.side_effect
+        def foreign(*args, **kwargs):
+            renderer = original_factory(*args, **kwargs)
+            renderer.install.side_effect = ManagerError('renderer_install_refused')
+            return renderer
+        self.factory.side_effect = foreign
+        for now in (0, 1, 4, 5, 6, 10, 14, 15):
+            self.assertEqual(self.collection.sync({}, now=now)['unavailable'], 1)
+        self.assertEqual(len(self.created), 3)  # attempts at 0, 5, 15 only
+        self.assertEqual(len({renderer.token for renderer in self.created}), 1)
+        for renderer in self.created:
+            renderer.dispose.assert_not_called()
+
+    def test_transport_reconnect_preserves_tokens_and_rebinds_target_sessions(self):
+        self.collection.sync({}, now=0)
+        tokens = [renderer.token for renderer in self.created]
+        second_session = MagicMock()
+        second_session.closed = False
+        second_session.list_codex_pages.return_value = ('first', 'second')
+        second_session.attach_codex_target.side_effect = self.session.attach_codex_target.side_effect
+        self.session.closed = True
+        self.connect.return_value = second_session
+        self.assertEqual(self.collection.sync({}, now=5)['visible'], 2)
+        self.assertEqual([renderer.token for renderer in self.created[2:]], tokens)
+        self.assertEqual(self.connect.call_count, 2)
+        for renderer in self.created[2:]:
+            self.assertIs(renderer.session, second_session)
+
+    def test_cleanup_reconnects_with_owned_tokens_without_reinstalling_ui(self):
+        self.collection.sync({}, now=0)
+        tokens = [renderer.token for renderer in self.created]
+        self.session.closed = True
+        replacement = MagicMock()
+        replacement.closed = False
+        replacement.list_codex_pages.return_value = ('first', 'second')
+        replacement.attach_codex_target.side_effect = self.session.attach_codex_target.side_effect
+        self.connect.return_value = replacement
+        self.collection.dispose()
+        self.assertEqual([renderer.token for renderer in self.created[2:]], tokens)
+        for renderer in self.created[2:]:
+            renderer.install.assert_not_called()
+            renderer.dispose.assert_called_once()
+        self.assertEqual(self.collection.targets, {})
+
+    def test_cleanup_failure_in_one_window_still_attempts_other_window(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        first.dispose.side_effect = ManagerError('unverified')
+        with self.assertRaisesRegex(ManagerError, 'daily_renderer_cleanup_unverified'):
+            self.collection.dispose()
+        second.dispose.assert_called_once()
+
+    def test_cleanup_timeout_reconnects_once_and_cleans_all_original_owned_windows(self):
+        self.collection.sync({}, now=0)
+        tokens = {renderer.page.target_id: renderer.token for renderer in self.created}
+        first = self.created[0]
+        def timeout():
+            self.session.closed = True
+            raise CDPError('transport receive failed')
+        first.dispose.side_effect = timeout
+        replacement = MagicMock()
+        replacement.closed = False
+        replacement.list_codex_pages.return_value = ('first', 'second', 'new-foreign')
+        replacement.attach_codex_target.side_effect = self.session.attach_codex_target.side_effect
+        self.connect.return_value = replacement
+        self.collection.dispose()
+        self.assertEqual(self.connect.call_count, 2)  # initial sync + one recovery
+        self.assertEqual({renderer.page.target_id: renderer.token for renderer in self.created[2:]}, tokens)
+        self.assertEqual([renderer.page.target_id for renderer in self.created[2:]], ['second', 'first'])
+        self.assertEqual(replacement.attach_codex_target.call_count, 2)
+        for renderer in self.created[2:]:
+            renderer.install.assert_not_called()
+            renderer.dispose.assert_called_once()
+        self.assertEqual(self.collection.targets, {})
+
+    def test_cleanup_persistent_timeout_is_deferred_until_healthy_window_is_cleaned(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        cleanup_order = []
+        def timeout(session):
+            cleanup_order.append('first')
+            session.closed = True
+            raise CDPError('transport receive failed')
+        first.dispose.side_effect = lambda: timeout(self.session)
+        replacement = MagicMock()
+        replacement.closed = False
+        replacement.list_codex_pages.return_value = ('first', 'second')
+        replacement.attach_codex_target.side_effect = self.session.attach_codex_target.side_effect
+        self.connect.return_value = replacement
+        original_factory = self.factory.side_effect
+        def create(*args, **kwargs):
+            renderer = original_factory(*args, **kwargs)
+            if renderer.page.target_id == 'first':
+                renderer.dispose.side_effect = lambda: timeout(replacement)
+            else:
+                renderer.dispose.side_effect = lambda: cleanup_order.append('second')
+            return renderer
+        self.factory.side_effect = create
+        with self.assertRaisesRegex(ManagerError, 'daily_renderer_cleanup_unverified'):
+            self.collection.dispose()
+        self.assertEqual(cleanup_order, ['first', 'second', 'first'])
+        self.assertEqual(self.connect.call_count, 2)
+        recovered_second = self.created[2]
+        self.assertEqual(recovered_second.token, second.token)
+        recovered_second.dispose.assert_called_once()
+        for renderer in self.created[2:]:
+            renderer.install.assert_not_called()
+
+    def test_cleanup_window_closing_during_disposal_is_not_failure(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        def closed_window():
+            self.session.list_codex_pages.return_value = ('second',)
+            raise CDPError('window closed')
+        first.dispose.side_effect = closed_window
+        self.collection.dispose()
+        second.dispose.assert_called_once()
+        self.assertEqual(self.connect.call_count, 1)
+        self.assertEqual(self.collection.targets, {})
+
+    def test_cleanup_reconnection_budget_is_bounded_and_does_not_claim_success(self):
+        self.collection.sync({}, now=0)
+        first = self.created[0]
+        def timeout():
+            self.session.closed = True
+            raise CDPError('transport receive failed')
+        first.dispose.side_effect = timeout
+        self.connect.side_effect = CDPError('reconnection failed')
+        with self.assertRaisesRegex(ManagerError, 'daily_renderer_cleanup_unverified'):
+            self.collection.dispose()
+        self.assertEqual(self.connect.call_count, 2)
+        self.assertEqual(set(self.collection.targets), {'first', 'second'})
+
+
 class DailyManagerTests(unittest.TestCase):
     def setUp(self):
         self.host = MagicMock()
@@ -259,13 +486,13 @@ class DailyManagerTests(unittest.TestCase):
     def test_daily_deadline_disposes_bar_but_preserves_app_and_uses_daily_quota_home(self):
         clock = [0.0]
         renderer = MagicMock()
-        renderer.update.return_value = {'mounted': True, 'visible': True}
+        renderer.sync.return_value = {'mounted': 1, 'visible': 1, 'unavailable': 0}
         worker = MagicMock()
         worker.submit.return_value.done.return_value = False
         with patch('codex_bar.manager.DailyHost', return_value=self.host), \
              patch('codex_bar.manager.read_assets', return_value={}), \
              patch('codex_bar.manager.BrowserSession') as browser, \
-             patch('codex_bar.manager.Renderer', return_value=renderer), \
+             patch('codex_bar.manager.RendererCollection', return_value=renderer), \
              patch('codex_bar.manager.CodexQuotaClient') as quota, \
              patch('codex_bar.manager.QuotaBridge'), \
              patch('codex_bar.manager.ThreadPoolExecutor', return_value=worker), \
@@ -274,10 +501,33 @@ class DailyManagerTests(unittest.TestCase):
              patch('builtins.print'):
             run_daily(duration=1)
         quota.assert_called_once_with(codex_home=Path('/fixture/.codex'))
-        browser.connect.return_value.attach_codex_page.assert_called_once_with(allow_application_routes=True)
+        renderer.sync.assert_called_once()
         renderer.dispose.assert_called_once()
-        browser.connect.return_value.close.assert_called_once()
+        renderer.close.assert_called_once()
         self.host.detach.assert_called_once()
+        self.host.stop.assert_not_called()
+
+    def test_transient_connection_failures_retry_on_heartbeat_with_one_quota_worker(self):
+        clock = [0.0]
+        collection = MagicMock()
+        collection.sync.side_effect = [CDPError('unavailable'), CDPError('unavailable'),
+                                      {'mounted': 1, 'visible': 1, 'unavailable': 0}]
+        worker = MagicMock()
+        worker.submit.return_value.done.return_value = False
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.RendererCollection', return_value=collection), \
+             patch('codex_bar.manager.CodexQuotaClient'), \
+             patch('codex_bar.manager.QuotaBridge'), \
+             patch('codex_bar.manager.ThreadPoolExecutor', return_value=worker), \
+             patch('codex_bar.manager.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('codex_bar.manager.time.sleep', side_effect=lambda s: clock.__setitem__(0, clock[0]+s)), \
+             patch('builtins.print'):
+            run_daily(duration=11)
+        self.assertEqual(collection.sync.call_count, 3)
+        worker.submit.assert_called_once()
+        collection.dispose.assert_called_once()
+        collection.close.assert_called_once()
         self.host.stop.assert_not_called()
 
     def test_user_quitting_app_is_normal_and_skips_disposing_dead_renderer(self):
@@ -287,7 +537,7 @@ class DailyManagerTests(unittest.TestCase):
         with patch('codex_bar.manager.DailyHost', return_value=self.host), \
              patch('codex_bar.manager.read_assets', return_value={}), \
              patch('codex_bar.manager.BrowserSession'), \
-             patch('codex_bar.manager.Renderer', return_value=renderer), \
+             patch('codex_bar.manager.RendererCollection', return_value=renderer), \
              patch('codex_bar.manager.CodexQuotaClient'), \
              patch('codex_bar.manager.QuotaBridge'), \
              patch('codex_bar.manager.ThreadPoolExecutor'), patch('builtins.print'):
@@ -309,13 +559,13 @@ class DailyManagerTests(unittest.TestCase):
         with patch('codex_bar.manager.DailyHost', return_value=self.host), \
              patch('codex_bar.manager.read_assets', return_value={}), \
              patch('codex_bar.manager.BrowserSession') as browser, \
-             patch('codex_bar.manager.Renderer'), \
+             patch('codex_bar.manager.RendererCollection') as collection, \
              patch('codex_bar.manager.CodexQuotaClient'), \
              patch('codex_bar.manager.QuotaBridge'), \
              patch('codex_bar.manager.ThreadPoolExecutor', return_value=worker), patch('builtins.print'):
             with self.assertRaisesRegex(HostError, 'process_inspection_failed'):
                 run_daily(duration=1)
-        browser.connect.return_value.close.assert_called_once()
+        collection.return_value.close.assert_called_once()
         worker.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         self.host.detach.assert_called_once()
         self.host.stop.assert_not_called()
@@ -329,7 +579,7 @@ class DailyManagerTests(unittest.TestCase):
         with patch('codex_bar.manager.DailyHost', return_value=self.host), \
              patch('codex_bar.manager.read_assets', return_value={}), \
              patch('codex_bar.manager.BrowserSession'), \
-             patch('codex_bar.manager.Renderer', return_value=renderer), \
+             patch('codex_bar.manager.RendererCollection', return_value=renderer), \
              patch('codex_bar.manager.CodexQuotaClient'), \
              patch('codex_bar.manager.QuotaBridge'), \
              patch('codex_bar.manager.ThreadPoolExecutor'), patch('builtins.print'):

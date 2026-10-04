@@ -38,6 +38,10 @@ class CDPError(RuntimeError):
     """Sanitized transport, scope, protocol, or remote-command failure."""
 
 
+class CDPCommandError(CDPError):
+    """A valid rejection of one request; other target sessions remain usable."""
+
+
 @dataclass(frozen=True)
 class AttachedPage:
     target_id: str
@@ -373,12 +377,16 @@ class BrowserSession:
                             or response.get("sessionId") != session_id):
                         continue
                     if "error" in response:
-                        raise CDPError("Browser command was rejected.")
+                        raise CDPCommandError("Browser command was rejected.")
                     result = response.get("result")
                     if not isinstance(result, dict):
                         raise CDPError("Invalid browser command result.")
                     return result
                 raise CDPError("Browser event limit exceeded.")
+            except CDPCommandError:
+                # A closing/reloading window may reject its own command. The
+                # correctly framed response does not invalidate other windows.
+                raise
             except Exception as exc:
                 self.close()
                 if isinstance(exc, CDPError):
@@ -386,6 +394,58 @@ class BrowserSession:
                 raise CDPError("Browser request failed.") from None
         finally:
             self._lock.release()
+
+    def list_codex_pages(self, *, allow_application_routes: bool = True,
+                         timeout: float | None = None) -> tuple[str, ...]:
+        """Return canonical app target IDs only; discard titles and full URLs."""
+        if type(allow_application_routes) is not bool:
+            raise CDPError("Invalid application route option.")
+        result = self.call("Target.getTargets", timeout=timeout)
+        targets = result.get("targetInfos")
+        if not isinstance(targets, list) or len(targets) > 256:
+            raise CDPError("Invalid browser target inventory.")
+        matches = []
+        for target in targets:
+            if not isinstance(target, dict):
+                raise CDPError("Invalid browser target metadata.")
+            if target.get("type") != "page":
+                continue
+            url = target.get("url")
+            if not isinstance(url, str) or len(url) > 4096:
+                raise CDPError("Invalid browser target metadata.")
+            try:
+                parsed = urlsplit(url)
+            except ValueError:
+                raise CDPError("Invalid browser target metadata.") from None
+            if parsed.scheme != "app" or parsed.netloc != "-":
+                continue
+            if not allow_application_routes and url not in ("app://-/", "app://-/index.html"):
+                raise CDPError("Unexpected Codex application route.")
+            target_id = target.get("targetId")
+            if (not isinstance(target_id, str) or not _ID.fullmatch(target_id)
+                    or target_id in matches):
+                raise CDPError("Invalid browser target metadata.")
+            matches.append(target_id)
+        self._app_targets = frozenset(matches)
+        return tuple(matches)
+
+    def attach_codex_target(self, target_id: str, *, timeout: float | None = None) -> AttachedPage:
+        """Attach only an ID from this connection's last canonical inventory."""
+        if target_id not in getattr(self, '_app_targets', ()):
+            raise CDPError("Undiscovered Codex application target.")
+        attached = self.call("Target.attachToTarget", {"targetId": target_id, "flatten": True},
+                             timeout=timeout)
+        session_id = attached.get("sessionId")
+        if not isinstance(session_id, str) or not _ID.fullmatch(session_id):
+            raise CDPError("Invalid attached Codex page session.")
+        return AttachedPage(target_id=target_id, session_id=session_id)
+
+    def detach_page(self, page: AttachedPage) -> None:
+        self.call("Target.detachFromTarget", {"sessionId": page.session_id})
+
+    @property
+    def closed(self) -> bool:
+        return self._websocket.closed
 
     def attach_codex_page(self, *, wait_timeout: float = 20.0,
                           allow_application_routes: bool = False) -> AttachedPage:
@@ -402,43 +462,15 @@ class BrowserSession:
             raise CDPError("Invalid application route option.")
         deadline = time.monotonic() + _duration(wait_timeout)
         while True:
-            result = self.call("Target.getTargets", timeout=min(self._timeout, _remaining(deadline)))
-            targets = result.get("targetInfos")
-            if not isinstance(targets, list) or len(targets) > 256:
-                raise CDPError("Invalid browser target inventory.")
-            matches = []
-            for target in targets:
-                if not isinstance(target, dict):
-                    raise CDPError("Invalid browser target metadata.")
-                if target.get("type") != "page":
-                    continue
-                url = target.get("url")
-                if not isinstance(url, str) or len(url) > 4096:
-                    raise CDPError("Invalid browser target metadata.")
-                try:
-                    parsed = urlsplit(url)
-                except ValueError:
-                    raise CDPError("Invalid browser target metadata.") from None
-                if parsed.scheme != "app" or parsed.netloc != "-":
-                    continue
-                if not allow_application_routes and url not in ("app://-/", "app://-/index.html"):
-                    raise CDPError("Unexpected Codex application route.")
-                target_id = target.get("targetId")
-                if not isinstance(target_id, str) or not _ID.fullmatch(target_id):
-                    raise CDPError("Invalid browser target metadata.")
-                matches.append(target_id)
+            matches = self.list_codex_pages(allow_application_routes=allow_application_routes,
+                                           timeout=min(self._timeout, _remaining(deadline)))
             if len(matches) > 1:
                 raise CDPError("A single Codex application page is required.")
             if matches:
                 target_id = matches[0]
                 break
             time.sleep(min(0.2, _remaining(deadline)))
-        attached = self.call("Target.attachToTarget", {"targetId": target_id, "flatten": True},
-                             timeout=min(self._timeout, _remaining(deadline)))
-        session_id = attached.get("sessionId")
-        if not isinstance(session_id, str) or not _ID.fullmatch(session_id):
-            raise CDPError("Invalid attached Codex page session.")
-        return AttachedPage(target_id=target_id, session_id=session_id)
+        return self.attach_codex_target(target_id, timeout=min(self._timeout, _remaining(deadline)))
 
     def close(self) -> None:
         self._websocket.close()

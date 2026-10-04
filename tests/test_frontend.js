@@ -145,7 +145,7 @@ function environment({ renderer = true, adapter = true } = {}) {
   editor.append(paragraph); composer.append(portal, editor); document.body.append(composer);
   return {
     window, document, composer, portal, editor, media, frames, timers, intervals, observers,
-    now: () => now, install: () => window.CodexUsageBarAdapter.install({ css: '', homeOnly: true }),
+    now: () => now, install: (homeOnly = true) => window.CodexUsageBarAdapter.install({ css: '', homeOnly }),
     flush() { const pending = [...frames.values()]; frames.clear(); for (const fn of pending) fn(); },
     mutate() { for (const observer of observers) if (!observer.disconnected) observer.fn([{ type: 'childList', target: editor, addedNodes: [], removedNodes: [] }]); },
     tick(ms) {
@@ -262,6 +262,122 @@ test('ambiguous composers, associated portals and external ownership never mount
   api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().reason, 'ambiguous-home'); duplicate.remove();
   const foreign = env.document.createElement('div'); foreign.setAttribute('data-codex-usage-bar', ''); env.document.body.append(foreign);
   api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().reason, 'ownership-conflict'); api.dispose(); assert.equal(env.mounted(), foreign);
+});
+
+test('adapter requires an explicit boolean mode', () => {
+  const env = environment();
+  for (const value of [undefined, null, 0, 1, 'false', 'true']) {
+    assert.throws(() => env.window.CodexUsageBarAdapter.install({ css: '', homeOnly: value }), /invalid-options/);
+  }
+  const api = env.install(false); assert.equal(api.inspect().homeOnly, false); api.dispose();
+});
+
+test('persistent mode accepts canonical app routes and ignores conversation text and identifier values', () => {
+  const env = environment();
+  env.composer.setAttribute('data-composer-placement', 'thread');
+  env.portal.setAttribute('data-above-composer-conversation-id', 'PRIVATE_IDENTIFIER_DO_NOT_READ');
+  const readAttribute = env.portal.getAttribute.bind(env.portal);
+  env.portal.getAttribute = name => {
+    if (name === 'data-above-composer-conversation-id') throw new Error('forbidden identifier access');
+    return readAttribute(name);
+  };
+  for (const name of ['textContent', 'innerHTML', 'innerText']) {
+    Object.defineProperty(env.editor, name, { get() { throw new Error('forbidden editor access'); } });
+  }
+  const turn = env.document.createElement('article'); turn.setAttribute('data-turn-key', 'PRIVATE_TURN');
+  Object.defineProperty(turn, 'textContent', { get() { throw new Error('forbidden turn access'); } });
+  env.document.body.append(turn);
+  const api = env.install(false);
+  for (const url of ['app://-/thread/fixture', 'app://-/?thread=fixture', 'app://-/#fixture']) {
+    env.window.location.href = url; assert.equal(api.setAccountSnapshot(snapshot(env)), true);
+    assert.equal(api.inspect().status, 'mounted'); assert.equal(api.inspect().reason, 'composer-ready');
+    assert.doesNotMatch(JSON.stringify(api.inspect()), /PRIVATE|fixture/);
+  }
+  api.dispose();
+});
+
+test('persistent mode refuses other origins, credentials and debug ports', () => {
+  const env = environment(), api = env.install(false);
+  for (const url of ['https://example.invalid/', 'app://example.invalid/', 'app://user@-/', 'app://-:1234/']) {
+    env.window.location.href = url; api.setAccountSnapshot(snapshot(env));
+    assert.equal(env.mounted(), null); assert.equal(api.inspect().reason, 'unsupported-route');
+  }
+  env.window.location.href = 'app://-/thread/fixture'; api.setAccountSnapshot(snapshot(env));
+  assert.equal(api.inspect().status, 'mounted'); api.dispose();
+});
+
+test('persistent mode retains one bar during text input and IME composition', () => {
+  const env = environment(), api = env.install(false), host = env.mounted();
+  env.editor.childNodes[0].childNodes.push({ nodeType: 3, get textContent() { throw new Error('forbidden text access'); } });
+  for (const type of ['beforeinput', 'input', 'compositionstart', 'input', 'compositionend']) {
+    env.document.dispatchEvent({ type, target: env.editor });
+    assert.equal(env.mounted(), host); env.flush();
+    assert.equal(env.mounted(), host); assert.equal(api.inspect().status, 'mounted');
+  }
+  assert.equal(env.document.querySelectorAll('[data-codex-usage-bar]').length, 1); api.dispose();
+});
+
+test('persistent mode retains the bar when sending disables the same editor', () => {
+  const env = environment(), api = env.install(false), host = env.mounted();
+  env.editor.setAttribute('contenteditable', 'false'); env.editor.setAttribute('aria-disabled', 'true');
+  env.mutate(); env.flush();
+  assert.equal(api.inspect().status, 'mounted'); assert.equal(env.mounted(), host);
+  env.editor.setAttribute('contenteditable', 'true'); env.editor.removeAttribute('aria-disabled');
+  env.mutate(); env.flush(); assert.equal(env.mounted(), host); api.dispose();
+});
+
+test('persistent mode selects only the visible supported composer and its direct portal', () => {
+  const env = environment();
+  env.composer.setAttribute('data-composer-placement', 'thread');
+  const hiddenHome = env.document.createElement('div'); hiddenHome.hidden = true;
+  hiddenHome.setAttribute('data-codex-composer-root', ''); hiddenHome.setAttribute('data-composer-placement', 'home');
+  const hiddenEditor = env.document.createElement('div'); hiddenEditor.className = 'ProseMirror';
+  hiddenEditor.setAttribute('contenteditable', 'true'); hiddenEditor.hidden = true;
+  const wrapper = env.document.createElement('div'), nested = env.document.createElement('div');
+  nested.setAttribute('data-above-composer-portal', ''); nested.hidden = true; wrapper.append(nested);
+  env.composer.append(hiddenEditor, wrapper); env.document.body.append(hiddenHome);
+  const api = env.install(false); assert.equal(api.inspect().status, 'mounted');
+  assert.equal(env.mounted().parentElement, env.portal);
+  assert.match(env.mounted().style.cssText, /grid-column:1 \/ -1/);
+  hiddenHome.hidden = false; api.setAccountSnapshot(snapshot(env));
+  assert.equal(env.mounted(), null); assert.equal(api.inspect().reason, 'ambiguous-composer');
+  hiddenHome.remove(); env.composer.setAttribute('data-composer-placement', 'unknown');
+  api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().reason, 'unsupported-composer'); api.dispose();
+});
+
+test('persistent mode remounts safely after editor and whole composer replacement', () => {
+  const env = environment(), api = env.install(false), firstHost = env.mounted();
+  const editor = env.document.createElement('div'); editor.className = 'ProseMirror'; editor.setAttribute('contenteditable', 'true');
+  env.editor.remove(); env.composer.append(editor); env.mutate(); env.flush();
+  const secondHost = env.mounted(); assert.notEqual(secondHost, firstHost); assert.equal(firstHost.isConnected, false);
+  const composer = env.document.createElement('div'); composer.setAttribute('data-codex-composer-root', '');
+  composer.setAttribute('data-composer-placement', 'thread');
+  const portal = env.document.createElement('div'); portal.setAttribute('data-above-composer-portal', '');
+  const nextEditor = env.document.createElement('div'); nextEditor.className = 'ProseMirror'; nextEditor.setAttribute('contenteditable', 'false');
+  composer.append(portal, nextEditor); env.composer.remove(); env.document.body.append(composer);
+  env.mutate(); env.flush(); assert.equal(api.inspect().status, 'mounted');
+  assert.equal(env.mounted().parentElement, portal); assert.equal(secondHost.isConnected, false);
+  assert.equal(env.document.querySelectorAll('[data-codex-usage-bar]').length, 1); api.dispose();
+  assert.equal(env.document.listenerCount(), 0); assert.equal(env.frames.size + env.timers.size + env.intervals.size, 0);
+  assert.ok(env.observers.every(observer => observer.disconnected));
+});
+
+test('persistent mode refuses ambiguous visible editors and never deletes foreign owned bars', () => {
+  const env = environment(), api = env.install(false);
+  const extra = env.document.createElement('div'); extra.className = 'ProseMirror'; extra.setAttribute('contenteditable', 'false');
+  env.composer.append(extra); api.setAccountSnapshot(snapshot(env));
+  assert.equal(env.mounted(), null); assert.equal(api.inspect().reason, 'ambiguous-editor'); extra.remove();
+  const foreign = env.document.createElement('div'); foreign.setAttribute('data-codex-usage-bar', ''); env.document.body.append(foreign);
+  api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().reason, 'ownership-conflict');
+  api.dispose(); assert.equal(env.mounted(), foreign);
+});
+
+test('persistent mode hides overlapping native portal controls and recovers when their geometry changes', () => {
+  const env = environment(), native = env.document.createElement('button'); env.portal.append(native);
+  const api = env.install(false); assert.equal(api.inspect().status, 'hidden');
+  assert.equal(api.inspect().reason, 'native-portal-overlap'); assert.equal(env.mounted().style.display, 'none');
+  native.box = { x: 100, y: 150, left: 100, top: 150, right: 700, bottom: 180, width: 600, height: 30 };
+  api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().status, 'mounted'); api.dispose();
 });
 
 test('heartbeat expiry clears percentages and fresh updates recover', () => {

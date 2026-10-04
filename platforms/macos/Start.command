@@ -7,7 +7,9 @@ cd "$resource_root"
 
 print 'codex-usage-bar'
 print 'Starts your regular Codex with its existing login, settings, and conversation history.'
-print 'If Codex is already open, save your work and quit it with Cmd-Q once; this launcher waits.'
+print 'The usage bar stays above the native composer on home and conversation pages.'
+print 'An instance already started by this launcher can reconnect without restarting.'
+print 'If Codex was opened directly, save your work and quit it with Cmd-Q once; this launcher waits.'
 print 'Press Ctrl-C here to remove the bar and leave Codex running.'
 print 'The local debug port stays open until you quit Codex with Cmd-Q.'
 print ''

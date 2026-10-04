@@ -320,13 +320,23 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(sock.sent, [])
         self.assertTrue(sock.closed)
 
-    def test_remote_errors_never_include_payload_and_close_transport(self):
+    def test_remote_errors_never_include_payload_and_preserve_transport(self):
         incoming = frame({"id": 1, "error": {"message": "PRIVATE fixture", "data": "PRIVATE"}})
         session, sock = direct_session(incoming)
         with self.assertRaises(cdp.CDPError) as error:
             session.call("Target.getTargets")
         self.assertEqual(str(error.exception), "Browser command was rejected.")
-        self.assertTrue(sock.closed)
+        self.assertIsInstance(error.exception, cdp.CDPCommandError)
+        self.assertFalse(sock.closed)
+
+    def test_rejected_closed_window_does_not_disconnect_another_session(self):
+        incoming = frame({'id': 1, 'sessionId': 'closed', 'error': {'message': 'PRIVATE'}})
+        incoming += frame({'id': 2, 'sessionId': 'alive', 'result': {'ok': True}})
+        session, sock = direct_session(incoming)
+        with self.assertRaises(cdp.CDPCommandError):
+            session.call('Runtime.evaluate', {}, 'closed')
+        self.assertEqual(session.call('Runtime.evaluate', {}, 'alive'), {'ok': True})
+        self.assertFalse(sock.closed)
 
     def test_subscription_commands_are_rejected_without_send(self):
         for method in ("Runtime.enable", "Network.enable", "Page.enable", "Target.setDiscoverTargets", "Target.setAutoAttach"):
@@ -426,6 +436,37 @@ class CommandTests(unittest.TestCase):
         with self.assertRaises(cdp.CDPError):
             session.attach_codex_page(allow_application_routes=True)
         self.assertEqual(len(sock.sent), 1)
+
+    def test_daily_inventory_supports_multiple_pages_without_exposing_routes_or_titles(self):
+        targets = [
+            {'targetId': 'first', 'type': 'page', 'url': 'app://-/thread/PRIVATE', 'title': 'PRIVATE'},
+            {'targetId': 'second', 'type': 'page', 'url': 'app://-/index.html'},
+            {'targetId': 'foreign', 'type': 'page', 'url': 'app://-@external/PRIVATE'},
+            {'targetId': 'worker', 'type': 'worker', 'url': 'app://-/worker.js'},
+        ]
+        incoming = frame({'id': 1, 'result': {'targetInfos': targets}})
+        incoming += frame({'id': 2, 'result': {'sessionId': 'first-session'}})
+        incoming += frame({'id': 3, 'result': {'sessionId': 'second-session'}})
+        session, sock = direct_session(incoming)
+        self.assertEqual(session.list_codex_pages(), ('first', 'second'))
+        pages = [session.attach_codex_target(target) for target in ('first', 'second')]
+        self.assertNotIn('PRIVATE', repr(pages))
+        self.assertNotIn(b'PRIVATE', b''.join(sock.sent))
+
+    def test_daily_inventory_empty_is_immediate_and_undiscovered_target_never_attaches(self):
+        session, sock = direct_session(frame({'id': 1, 'result': {'targetInfos': []}}))
+        with patch.object(cdp.time, 'sleep') as sleep:
+            self.assertEqual(session.list_codex_pages(), ())
+            sleep.assert_not_called()
+        with self.assertRaisesRegex(cdp.CDPError, 'Undiscovered'):
+            session.attach_codex_target('other')
+        self.assertEqual(len(sock.sent), 1)
+
+    def test_duplicate_target_inventory_rejected(self):
+        target = {'targetId': 'same', 'type': 'page', 'url': 'app://-/'}
+        session, _ = direct_session(frame({'id': 1, 'result': {'targetInfos': [target, target]}}))
+        with self.assertRaisesRegex(cdp.CDPError, 'metadata'):
+            session.list_codex_pages()
 
     def test_daily_route_option_requires_boolean(self):
         session, sock = direct_session(b'')
