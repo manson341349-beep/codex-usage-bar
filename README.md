@@ -1,6 +1,6 @@
 # codex-usage-bar
 
-Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.7.2，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.7.3，macOS**；统一仓库为未来 Windows 实现保留平台目录。
 
 > **在日常 Codex 的原生输入框上方显示额度，首页和会话页面都可使用。** 继续使用原有账号、历史、设置和项目；输入文字、输入法组合输入和进入会话不再主动卸载横条。它是原版 Codex 的启动伴侣，不修改官方应用安装包。
 >
@@ -34,6 +34,7 @@ open "$HOME/Applications/codex-usage-bar.app"
 
 ## 当前能力与限制
 
+- 额度条左右边缘对齐原生输入框外壳，跟随窗口宽度及缩放；展开、折叠和查看详情时保持同宽。只调整自有信息栏，不修改原生输入框样式。
 - 在原生首页和会话输入框上方挂载独立的 Shadow DOM 信息栏；打字、输入法组合输入及切换会话时持续跟随输入框，不替换输入框，不读取输入正文或聊天内容。
 - 经官方 CLI 的只读 `account/read` 和 `account/rateLimits/read` 获取订阅额度，约每 60 秒刷新。每周订阅显示**剩余百分比**（100% − 官方已用比例），数字与进度条口径一致；5 小时仍显示已用比例。
 - 5h 或每周窗口缺失、身份不明、数据过期或待重置时明确显示未知/状态；**缺数据不表示无限制**。没有账户绑定的“用户确认无限制”设置。
@@ -80,7 +81,7 @@ python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
 node --test tests/test_frontend.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.7.2-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.7.3-source.zip
 ```
 
 构建只使用白名单源文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 是原创前端，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。

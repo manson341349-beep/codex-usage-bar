@@ -115,8 +115,9 @@ function environment({ renderer = true, adapter = true } = {}) {
   document.activeElement = document.body;
   const media = new Events(); media.matches = false;
   class Observer {
-    constructor(fn) { this.fn = fn; this.disconnected = false; observers.push(this); }
-    observe() {} unobserve() {} disconnect() { this.disconnected = true; }
+    constructor(fn) { this.fn = fn; this.disconnected = false; this.nodes = new Set(); observers.push(this); }
+    observe(node) { this.nodes.add(node); } unobserve(node) { this.nodes.delete(node); }
+    disconnect() { this.disconnected = true; this.nodes.clear(); }
   }
   const window = new Events();
   Object.assign(window, {
@@ -158,6 +159,68 @@ function environment({ renderer = true, adapter = true } = {}) {
     },
     mounted() { return document.querySelector('[data-codex-usage-bar]'); }
   };
+}
+
+// A controlled geometry model, separate from the simple DOM above: measurements
+// respond to the adapter's actual width/left writes, renderer mode and CSS zoom.
+// This tests the algorithm; browser fixtures separately validate browser layout.
+function alignmentFixture(overrides = {}) {
+  const env = environment();
+  const geometry = Object.assign({ left: 100.25, shellWidth: 736.4, scale: 1,
+    paddingLeft: 13.2, paddingRight: 7.4, shellTop: 450, hostTop: 180,
+    panelHeight: 140, ignoreOffset: false }, overrides);
+  let shell = env.document.createElement('div');
+  shell.append(env.editor); env.composer.append(shell);
+  const prototype = Object.getPrototypeOf(shell);
+  const originalRect = prototype.getBoundingClientRect;
+  const originalStyle = env.window.getComputedStyle;
+  const box = (left, top, width, height) => ({ x: left, y: top, left, top,
+    right: left + width, bottom: top + height, width, height });
+  const hostWidth = host => host?.style.width && host.style.width !== '100%' ?
+    parseFloat(host.style.width) : Math.max(0, geometry.shellWidth - geometry.paddingLeft - geometry.paddingRight);
+  const barHeight = () => {
+    const bar = env.mounted()?.shadowRoot.querySelector('.cbu-bar');
+    const panel = bar?.querySelector('.cbu-source-panel');
+    return (bar?.dataset.mode === 'compact' ? 44 : 90) + (panel && !panel.hidden ? geometry.panelHeight : 0);
+  };
+  prototype.getBoundingClientRect = function () {
+    if (this.style.display === 'none') return box(0, 0, 0, 0);
+    if (this === shell) return box(geometry.left, geometry.shellTop, geometry.shellWidth * geometry.scale, 130 * geometry.scale);
+    if (this === env.editor) return box(geometry.left + 12 * geometry.scale,
+      geometry.shellTop + 12 * geometry.scale, (geometry.shellWidth - 24) * geometry.scale, 70 * geometry.scale);
+    if (this === env.composer) return box(geometry.left, geometry.hostTop - 10,
+      geometry.shellWidth * geometry.scale, geometry.shellTop + 130 * geometry.scale - geometry.hostTop + 10);
+    if (this === env.portal) return box(geometry.left, geometry.hostTop,
+      geometry.shellWidth * geometry.scale, (barHeight() + 10) * geometry.scale);
+    const isBar = this.classList.contains('cbu-bar');
+    if (this.hasAttribute('data-codex-usage-bar') || isBar) {
+      const host = isBar ? this.getRootNode().host : this;
+      const shift = geometry.ignoreOffset ? 0 : parseFloat(host.style.left || '0');
+      const width = isBar ? Math.max(320, hostWidth(host)) : hostWidth(host);
+      return box(geometry.left + (geometry.paddingLeft + shift) * geometry.scale,
+        geometry.hostTop, width * geometry.scale, barHeight() * geometry.scale);
+    }
+    return originalRect.call(this);
+  };
+  for (const key of ['offsetWidth', 'clientWidth']) {
+    Object.defineProperty(prototype, key, { configurable: true, get() {
+      if (this === env.portal || this === env.composer || this === shell) return Math.round(geometry.shellWidth);
+      if (this.hasAttribute('data-codex-usage-bar')) return Math.round(hostWidth(this));
+      return this.getBoundingClientRect().width;
+    } });
+  }
+  env.window.getComputedStyle = node => {
+    const style = originalStyle(node);
+    if (node === env.portal) Object.assign(style, { paddingLeft: geometry.paddingLeft + 'px', paddingRight: geometry.paddingRight + 'px' });
+    if (node.hasAttribute('data-codex-usage-bar')) style.width = hostWidth(node) + 'px';
+    return style;
+  };
+  return { env, geometry, get shell() { return shell; }, replaceShell() {
+    const previous = shell;
+    shell = env.document.createElement('div'); shell.append(env.editor);
+    previous.remove(); env.composer.append(shell);
+    return previous;
+  } };
 }
 
 function snapshot(env, overrides = {}) {
@@ -520,6 +583,81 @@ test('unsafe fixture geometry collapses the bar and can recover after resize', (
   api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().status, 'hidden');
   assert.equal(api.inspect().layout.hiddenReason, 'native-overlap'); assert.equal(env.mounted().style.display, 'none');
   delete env.editor.box; api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().status, 'mounted'); api.dispose();
+});
+
+test('input alignment compensates asymmetric portal padding and fractional zoom without drift', () => {
+  for (const [scale, paddingLeft, paddingRight] of [[1, 13, 13], [1, 25, 7], [1.25, 13.2, 7.4]]) {
+    const { env, shell } = alignmentFixture({ scale, paddingLeft, paddingRight });
+    const originalPortalStyle = { ...env.portal.style }, originalShellStyle = { ...shell.style };
+    const api = env.install(false);
+    for (let iteration = 0; iteration < 8; iteration += 1) {
+      api.setAccountSnapshot(snapshot(env));
+      const layout = api.inspect().layout;
+      assert.equal(api.inspect().status, 'mounted');
+      assert.ok(Math.abs(layout.bar.left - shell.getBoundingClientRect().left) < 1e-8);
+      assert.ok(Math.abs(layout.bar.right - shell.getBoundingClientRect().right) < 1e-8);
+      assert.equal(layout.bar.width, layout.shell.width);
+    }
+    assert.deepEqual(env.portal.style, originalPortalStyle); assert.deepEqual(shell.style, originalShellStyle);
+    assert.ok(env.observers.some(observer => observer.nodes.has(shell)));
+    api.dispose();
+  }
+});
+
+test('compact, expanded and details layouts retain input edges across resize', () => {
+  const { env, geometry } = alignmentFixture();
+  const api = env.install(false), host = env.mounted(), bar = host.shadowRoot.querySelector('.cbu-bar');
+  const toggle = bar.querySelector('.cbu-toggle'), info = bar.querySelector('.cbu-info');
+  for (const control of [toggle, toggle, info, info]) {
+    geometry.shellWidth -= 21.25;
+    control.dispatchEvent({ type: 'click' });
+    env.document.dispatchEvent({ type: 'codex-usage-bar:layoutchange', target: host }); env.flush();
+    const layout = api.inspect().layout;
+    assert.equal(api.inspect().status, 'mounted');
+    assert.ok(Math.abs(layout.bar.left - layout.shell.left) < 1e-8);
+    assert.ok(Math.abs(layout.bar.right - layout.shell.right) < 1e-8);
+  }
+  api.dispose();
+});
+
+test('replacing the structural input branch remounts safely even when the editor is reused', () => {
+  const fixture = alignmentFixture(), { env } = fixture;
+  const api = env.install(false), previousHost = env.mounted(), previousShell = fixture.replaceShell();
+  env.mutate(); env.flush();
+  assert.equal(api.inspect().status, 'mounted'); assert.equal(previousHost.isConnected, false);
+  assert.notEqual(env.mounted(), previousHost);
+  assert.ok(env.observers.some(observer => observer.nodes.has(fixture.shell)));
+  assert.ok(env.observers.every(observer => !observer.nodes.has(previousShell)));
+  fixture.shell.style.display = 'contents'; env.mutate(); env.flush();
+  assert.equal(api.inspect().reason, 'unsupported-input-surface'); assert.equal(env.mounted(), null);
+  api.dispose();
+});
+
+test('unmeasurable neutral width recovers when only portal padding changes', () => {
+  const { env, geometry } = alignmentFixture({ shellWidth: 600, paddingLeft: 300, paddingRight: 300 });
+  const api = env.install(false);
+  assert.equal(api.inspect().status, 'hidden'); assert.equal(api.inspect().reason, 'unmeasurable');
+  const previousPortal = env.portal.getBoundingClientRect();
+  geometry.paddingLeft = 30; geometry.paddingRight = 50;
+  env.mutate(); env.flush();
+  assert.deepEqual(env.portal.getBoundingClientRect(), previousPortal);
+  assert.equal(api.inspect().status, 'mounted');
+  assert.ok(Math.abs(api.inspect().layout.bar.left - geometry.left) < 1e-8);
+  api.dispose();
+});
+
+test('alignment rejects a narrow input, ignored offsets and input-shell overlap then recovers', () => {
+  const { env, geometry } = alignmentFixture({ shellWidth: 300 });
+  const api = env.install(false);
+  assert.equal(api.inspect().reason, 'content-overflow'); assert.equal(env.mounted().style.display, 'none');
+  geometry.shellWidth = 600; geometry.ignoreOffset = true;
+  api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().reason, 'input-misaligned');
+  geometry.ignoreOffset = false; geometry.shellTop = 265;
+  api.setAccountSnapshot(snapshot(env));
+  assert.equal(api.inspect().reason, 'native-overlap');
+  assert.ok(api.inspect().layout.editor.top > geometry.hostTop + 90, 'editor alone would not detect shell overlap');
+  geometry.shellTop = 450; api.setAccountSnapshot(snapshot(env));
+  assert.equal(api.inspect().status, 'mounted'); api.dispose();
 });
 
 test('details that exceed the viewport close before the adapter hides the otherwise safe bar', () => {

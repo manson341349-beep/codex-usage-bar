@@ -226,10 +226,17 @@
       if (editors.length !== 1 || !shown(editors[0])) return { reason: 'ambiguous-editor' };
       if (homeOnly && editors[0] === composingEditor) return { reason: 'editor-composing' };
       if (homeOnly && !emptyEditor(editors[0])) return { reason: 'nonempty-editor' };
+      // Use the structural input branch, not the narrower text-editing area.
+      // No module-specific class names or editor text are needed.
+      const inputAncestors = ancestorChain(editors[0]);
+      const rootIndex = inputAncestors ? inputAncestors.indexOf(root) : -1;
+      const shell = rootIndex > 0 ? inputAncestors[rootIndex - 1] : null;
+      if (!shell || shell === portal || window.getComputedStyle(shell).display === 'contents' ||
+          !shown(shell)) return { reason: 'unsupported-input-surface' };
       if (!ancestorChain(portal)) return { reason: 'unsupported-ancestry' };
       const foreign = Array.from(document.querySelectorAll(MARKER)).some(node => node !== host);
       if (foreign) return { reason: 'ownership-conflict' };
-      return { root: root, portal: portal, editor: editors[0], placement: placement };
+      return { root: root, portal: portal, editor: editors[0], shell: shell, placement: placement };
     }
 
     function syncCacheThread() {
@@ -356,19 +363,40 @@
     function fingerprint() {
       const values = [contentRevision, layoutRevision, currentTheme, viewport()];
       const nativePortalChildren = Array.from(target.portal.children).filter(node => node !== host);
-      for (const node of [target.root, target.editor].concat(
+      for (const node of [target.root, target.editor, target.shell].concat(
           ancestorChain(target.portal) || [], nativePortalChildren)) {
         const style = window.getComputedStyle(node);
         values.push(rect(node), node.clientWidth, node.clientHeight, style.overflowX,
-          style.overflowY, style.display, style.visibility, style.transform, style.zoom);
+          style.overflowY, style.display, style.visibility, style.transform, style.zoom,
+          style.paddingLeft, style.paddingRight, style.borderLeftWidth, style.borderRightWidth);
       }
       return JSON.stringify(values);
     }
 
-    function measure() {
+    function alignToInput() {
+      // Neutral measurement prevents offsets from accumulating across resizes.
+      // Only the owned host is adjusted; negative left can compensate portal padding.
+      host.style.setProperty('width', '100%', 'important');
+      host.style.setProperty('left', '0px', 'important');
+      const base = rect(host);
+      const shell = rect(target.shell);
+      const width = window.getComputedStyle(host).width;
+      const cssWidth = typeof width === 'string' && /^\d+(?:\.\d+)?px$/.test(width) ?
+        Number.parseFloat(width) : host.offsetWidth;
+      const scale = base.width / cssWidth;
+      if (!validRect(base) || !validRect(shell) || !Number.isFinite(scale) || scale <= 0) {
+        return 'unmeasurable';
+      }
+      host.style.setProperty('width', (shell.width / scale) + 'px', 'important');
+      host.style.setProperty('left', ((shell.left - base.left) / scale) + 'px', 'important');
+      return null;
+    }
+
+    function measure(alignmentFailure) {
       const bar = rect(host);
       const content = rect(mounted.element);
       const editor = rect(target.editor);
+      const shell = rect(target.shell);
       const view = viewport();
       let clipped = false;
       let unsupportedTransform = false;
@@ -395,25 +423,31 @@
           if (!contained(bar, clip, clipX, clipY) || !contained(content, clip, clipX, clipY)) clipped = true;
         }
       }
-      const overlaps = overlap(bar, editor) || overlap(content, editor);
+      const overlaps = overlap(bar, editor) || overlap(content, editor) ||
+        overlap(bar, shell) || overlap(content, shell);
       const portalOverlap = Array.from(target.portal.children).some(node =>
         node !== host && shown(node) && (overlap(bar, rect(node)) || overlap(content, rect(node))));
       const inside = contained(bar, view, true, true) && contained(content, view, true, true);
       const overflow = !contained(content, bar, true, true) ||
         mounted.element.scrollWidth > mounted.element.clientWidth + 1;
-      let failure = null;
-      if (!validRect(bar) || !validRect(content) || !validRect(editor) || !validRect(view)) failure = 'unmeasurable';
+      const aligned = [bar, content].every(box => Math.abs(box.left - shell.left) <= EPSILON &&
+        Math.abs(box.right - shell.right) <= EPSILON);
+      let failure = alignmentFailure;
+      if (failure) { /* Preserve the failed neutral probe. */ }
+      else if (!validRect(bar) || !validRect(content) || !validRect(editor) ||
+          !validRect(shell) || !validRect(view)) failure = 'unmeasurable';
       else if (unsupportedTransform) failure = 'unsupported-transform';
       else if (overflow) failure = 'content-overflow';
       else if (overlaps) failure = 'native-overlap';
       else if (portalOverlap) failure = 'native-portal-overlap';
-      else if (bar.bottom > editor.top + EPSILON) failure = 'unsupported-order';
+      else if (Math.max(bar.bottom, content.bottom) > Math.min(editor.top, shell.top) + EPSILON) failure = 'unsupported-order';
       else if (clipped) failure = 'ancestor-clipped';
       else if (!inside) failure = 'outside-viewport';
+      else if (!aligned) failure = 'input-misaligned';
       return {
         mode: 'native-flow', visible: failure === null, hiddenReason: failure,
-        root: rect(target.root), portal: rect(target.portal), bar: bar, editor: editor,
-        gapToNativeContent: editor.top - Math.max(bar.bottom, content.bottom),
+        root: rect(target.root), portal: rect(target.portal), bar: bar, editor: editor, shell: shell,
+        gapToNativeContent: Math.min(editor.top, shell.top) - Math.max(bar.bottom, content.bottom),
         overlapsNativeContent: overlaps || portalOverlap, clippedByAncestor: clipped, barWithinViewport: inside,
         reservedHeight: host.offsetHeight + 10, naturalHeight: mounted.element.offsetHeight,
         safety: { checked: true, safe: failure === null, reason: failure, clipCount: clipCount }
@@ -427,7 +461,7 @@
       naturalHeight = measured.naturalHeight;
       layout = {
         mode: 'native-flow', visible: false, hiddenReason: measured.hiddenReason,
-        root: rect(target.root), portal: rect(target.portal), bar: rect(host), editor: rect(target.editor),
+        root: rect(target.root), portal: rect(target.portal), bar: rect(host), editor: rect(target.editor), shell: rect(target.shell),
         gapToNativeContent: null, overlapsNativeContent: false, clippedByAncestor: false,
         barWithinViewport: false, reservedHeight: 0, naturalHeight: naturalHeight,
         safety: measured.safety
@@ -441,9 +475,9 @@
       // Probe and collapse happen in one JS task; the unsafe bar is never painted.
       host.style.setProperty('visibility', 'hidden', 'important');
       host.style.setProperty('display', 'block', 'important');
-      let measured = measure();
+      let measured = measure(alignToInput());
       // Details must never make the entire bar disappear with no close control.
-      if (!measured.visible && mounted.closeInfo()) measured = measure();
+      if (!measured.visible && mounted.closeInfo()) measured = measure(alignToInput());
       naturalHeight = measured.naturalHeight;
       if (!measured.visible) {
         hide(measured);
@@ -460,6 +494,7 @@
       const wanted = new Set([document.documentElement]);
       if (target) {
         wanted.add(target.editor);
+        wanted.add(target.shell);
         for (const ancestor of ancestorChain(target.portal) || []) wanted.add(ancestor);
         for (const node of target.portal.children) if (node !== host) wanted.add(node);
       }
@@ -494,7 +529,7 @@
       knownHosts.add(host);
       host.setAttribute('data-codex-usage-bar', '');
       host.style.cssText = 'display:block!important;visibility:hidden!important;position:relative!important;' +
-        'box-sizing:border-box!important;width:100%!important;max-width:100%!important;min-width:0!important;' +
+        'box-sizing:border-box!important;width:100%!important;max-width:none!important;min-width:0!important;left:0!important;right:auto!important;' +
         'height:auto!important;margin:0 0 10px!important;padding:0!important;border:0!important;' +
         'flex:none!important;float:none!important;transform:none!important;' +
         'grid-column:1 / -1!important;grid-row:auto!important;align-self:stretch!important;justify-self:stretch!important;';
@@ -523,7 +558,8 @@
         const next = candidate();
         if (!next.root) { refreshSnapshot(); unmount(next.reason); return; }
         if (host && (!host.isConnected || host.parentElement !== next.portal || !target ||
-            target.root !== next.root || target.portal !== next.portal || target.editor !== next.editor)) {
+            target.root !== next.root || target.portal !== next.portal || target.editor !== next.editor ||
+            target.shell !== next.shell)) {
           unmount(homeOnly ? 'home-replaced' : 'composer-replaced');
         }
         refreshSnapshot();
