@@ -765,6 +765,24 @@ test('unsafe own-slot probing removes its reservation and does not remount until
   fixedApi.dispose();
 });
 
+test('room reservation skips only boxless contents wrappers and still checks outer boxes', () => {
+  const f=roomFixture(), wrappers=[];
+  let branch=f.env.composer;
+  for(let i=0;i<3;i++){
+    const wrapper=f.env.document.createElement('div');wrapper.style.display='contents';
+    wrapper.box={x:0,y:0,left:0,top:0,right:0,bottom:0,width:0,height:0};
+    branch.parentElement.insertBefore(wrapper,branch);wrapper.append(branch);wrappers.push(wrapper);branch=wrapper;
+  }
+  const api=f.env.install(false);assert.equal(api.inspect().status,'mounted');assert.ok(f.slot());
+  wrappers[1].style.display='block';f.env.mutate();f.env.flush();
+  assert.equal(api.inspect().reason,'unsupported-room-reservation');assert.equal(f.slot(),null);assert.equal(f.env.mounted(),null);
+  wrappers[1].style.display='contents';f.env.mutate();f.env.flush();
+  assert.equal(api.inspect().status,'mounted','returning to boxless layout must retry');
+  wrappers[2].style.display='block';wrappers[2].box={x:100,y:556,left:100,top:556,right:1100,bottom:600,width:1000,height:44};
+  f.env.mutate();f.env.flush();assert.equal(api.inspect().reason,'unsupported-room-reservation');assert.equal(f.slot(),null);
+  api.dispose();
+});
+
 test('own-slot replacement and migration clean old companions and preserve native portal ownership', () => {
   const f=roomFixture(),instances=sprigStub(f.env),api=f.env.install(false);const old=f.slot();
   old.remove();f.env.mutate();f.env.flush();assert.notEqual(f.slot(),old);assert.equal(instances[0].destroys,1);assert.equal(instances.length,2);

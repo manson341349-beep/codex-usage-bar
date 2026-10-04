@@ -489,6 +489,8 @@
       // A room insertion must actually reserve height through its owning branch.
       // Overflow-visible fixed-height wrappers do not prove safe native layout.
       const roomReserved = !target.ownSlot || (ancestorChain(target.root) || []).every(node => {
+        // Boxless wrappers do not constrain layout; outer boxes still must contain it.
+        if (window.getComputedStyle(node).display === 'contents') return true;
         const box = rect(node);
         return contained(bar, box, false, true) && contained(content, box, false, true) &&
           contained(shell, box, false, true);
