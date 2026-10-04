@@ -23,19 +23,21 @@ MARKER = {'schemaVersion': 1, 'product': PRODUCT, 'bundleIdentifier': BUNDLE_ID}
 # Deliberately enumerate files: no recursive source-directory copies.
 PAYLOAD_FILES = (
     'codex_bar/__init__.py', 'codex_bar/__main__.py', 'codex_bar/manager.py',
-    'codex_bar/host.py', 'codex_bar/cdp.py', 'codex_bar/quota.py',
+    'codex_bar/host.py', 'codex_bar/daily_host.py', 'codex_bar/cdp.py', 'codex_bar/quota.py',
     'web/bar.js', 'web/bar.css', 'web/adaptive.js', 'web/asset-manifest.json',
-    'platforms/macos/Start.command', 'platforms/macos/install.py',
+    'platforms/macos/Start.command', 'platforms/macos/Test.command', 'platforms/macos/install.py',
     'platforms/macos/build.py', 'README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
+    'docs/VALIDATION.md',
 )
 SOURCE_EXTRA_FILES = (
     '.gitignore', 'web/preview.html', 'platforms/macos/test_packaging.py',
-    'tests/test_cdp.py', 'tests/test_host.py', 'tests/test_manager.py', 'tests/test_quota.py',
+    'tests/test_cdp.py', 'tests/test_host.py', 'tests/test_daily_host.py',
+    'tests/test_manager.py', 'tests/test_quota.py',
     'tests/test_frontend.js',
     'platforms/windows/README.md', '.github/workflows/ci.yml', 'scripts/validate.py',
 )
 OPTIONAL_SOURCE_FILES = (
-    'tests/test_assets.py', 'docs/VALIDATION.md',
+    'tests/test_assets.py',
 )
 APP_LAUNCHER = '''#!/bin/zsh
 set -eu

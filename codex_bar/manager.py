@@ -18,6 +18,7 @@ import time
 
 from .cdp import BrowserSession, CDPError
 from .host import ManagedHost, PROJECT_ROOT, HostError
+from .daily_host import DailyHost
 from .quota import CodexQuotaClient, QuotaBridge
 
 BRIDGE_KEY = 'codex-usage-bar.bridge.v1'
@@ -235,21 +236,142 @@ def run_foreground(*, duration=0, login_only=False, reuse_approved_profile=False
                 print('专用实例和调试端口已关闭；登录资料保留。', flush=True)
 
 
+def run_daily(*, duration=0, wait_for_exit=False):
+    """Attach the bar to the original daily profile; never stop the user's app."""
+    assets = read_assets()
+    with DailyHost() as host, stop_signals() as stop:
+        endpoint = None
+        announced_wait = False
+        while not stop[0]:
+            try:
+                endpoint = host.launch_or_attach()
+                break
+            except HostError as error:
+                if str(error) != 'daily_instance_running' or not wait_for_exit:
+                    raise
+                if not announced_wait:
+                    print('日常 Codex 正在运行。请先保存工作并用 Cmd-Q 正常退出；本启动器会等待，然后使用原账号、历史和项目重新打开。不会强制结束任务。', flush=True)
+                    announced_wait = True
+                time.sleep(1)
+        if endpoint is None:
+            print('已取消等待；日常 Codex 未改变。', flush=True)
+            return
+
+        session = renderer = executor = future = None
+        cleanup_failed = False
+        try:
+            session = BrowserSession.connect(endpoint.port, host.validate)
+            # Daily Codex may restore a conversation. Attach only to its one
+            # canonical app origin; the adapter still mounts ONLY at empty home.
+            page = session.attach_codex_page(allow_application_routes=True)
+            renderer = Renderer(session, page)
+            renderer.install(assets)
+            bridge = QuotaBridge(CodexQuotaClient(codex_home=host.quota_home))
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='quota')
+            print('已接入日常 Codex，沿用原资料。空白首页显示信息栏；输入/对话页卸载。Ctrl-C 仅关闭信息栏，Cmd-Q 退出 Codex。', flush=True)
+            deadline = time.monotonic() + duration if duration else None
+            next_refresh = next_heartbeat = 0.0
+            previous_layout = None
+            while not stop[0] and (deadline is None or time.monotonic() < deadline):
+                if not host.is_running():
+                    break
+                now = time.monotonic()
+                if future is not None and future.done():
+                    future.result()
+                    future = None
+                    next_refresh = now + 60
+                    next_heartbeat = 0.0
+                if future is None and now >= next_refresh:
+                    future = executor.submit(bridge.refresh)
+                if now >= next_heartbeat:
+                    layout = renderer.update(bridge.snapshot())
+                    state = (layout.get('mounted'), layout.get('visible'))
+                    if state != previous_layout:
+                        print('日常首页横条已挂载。' if all(state) else '等待空白首页；不读取对话或输入正文。', flush=True)
+                        previous_layout = state
+                    next_heartbeat = time.monotonic() + 5
+                time.sleep(.2)
+        except (CDPError, HostError, ManagerError) as original_error:
+            # Closing the app is a normal end to daily mode, not a reason to
+            # signal any process or classify a closed renderer as a leak.
+            try:
+                still_running = host.is_running()
+            except Exception:
+                raise original_error from None
+            if still_running:
+                raise
+        finally:
+            original_failure = sys.exc_info()[0] is not None
+            renderer_failed = False
+            result = None
+            try:
+                still_running = host.is_running()
+            except Exception:
+                still_running = None
+                cleanup_failed = True
+            if renderer is not None and still_running is True:
+                try:
+                    renderer.dispose()
+                except Exception:
+                    renderer_failed = True
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    cleanup_failed = True
+            if executor is not None:
+                try:
+                    executor.shutdown(wait=True, cancel_futures=True)
+                except Exception:
+                    cleanup_failed = True
+            try:
+                result = host.detach()
+            except Exception:
+                cleanup_failed = True
+            # Cmd-Q can race with dispose; a confirmed stopped app has no live
+            # renderer to remove. Unknown/orphaned state remains a failure.
+            if renderer_failed and not (result and result.get('status') == 'stopped'
+                                       and result.get('ownedProcessCount') == 0
+                                       and result.get('debugPortOpen') is False):
+                cleanup_failed = True
+            if result and result.get('appLeftRunning'):
+                print('信息栏管理器已断开；日常 Codex 继续运行。要关闭本地调试端口，请正常退出 Codex（Cmd-Q）。', flush=True)
+            elif result and result.get('status') == 'stopped':
+                print('日常 Codex 已退出，信息栏管理器结束。', flush=True)
+            if cleanup_failed:
+                print('信息栏清理未完全确认；未强制结束日常 Codex。请正常退出 Codex 后重新启动信息栏。', file=sys.stderr)
+                if not original_failure:
+                    raise ManagerError('daily_renderer_cleanup_unverified')
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='codex-usage-bar：仅专用实例、空白首页；当前支持 macOS。')
-    parser.add_argument('command', choices=('status', 'login', 'run', 'cleanup'))
+    parser = argparse.ArgumentParser(description='codex-usage-bar：日常 Codex 首页信息栏；另保留独立测试模式。')
+    parser.add_argument('command', choices=('daily', 'daily-status', 'status', 'login', 'run', 'cleanup'))
     parser.add_argument('--acknowledge-runtime', action='store_true',
                         help='仅在审阅并批准本次实际运行后使用；不是自动授权。')
     parser.add_argument('--duration', type=int, default=0, metavar='SECONDS')
     parser.add_argument('--reuse-approved-profile', action='store_true',
                         help='仅复用已批准的前次专用测试资料；不接受任意目录或复制凭据。')
+    parser.add_argument('--wait-for-exit', action='store_true',
+                        help='仅日常模式：等待已运行的 Codex 被本人正常退出，再启动信息栏版本。')
     args = parser.parse_args(argv)
     if args.duration < 0 or args.duration > 86400:
         parser.error('duration must be 0..86400')
-    if args.command != 'status' and not args.acknowledge_runtime:
+    if args.command not in ('status', 'daily-status') and not args.acknowledge_runtime:
         parser.error('实际运行需先获批准，再显式传 --acknowledge-runtime')
+    if args.wait_for_exit and args.command != 'daily':
+        parser.error('--wait-for-exit is only available for daily')
+    if args.reuse_approved_profile and args.command in ('daily', 'daily-status'):
+        parser.error('daily mode always uses the existing everyday profile')
     try:
-        if args.command == 'status':
+        if args.command == 'daily':
+            run_daily(duration=args.duration, wait_for_exit=args.wait_for_exit)
+        elif args.command == 'daily-status':
+            with DailyHost() as host:
+                result = host.status()
+                print(json.dumps({k: result.get(k) for k in
+                      ('status', 'ownedProcessCount', 'debugPortOpen', 'appLeftRunning')}, ensure_ascii=False))
+        elif args.command == 'status':
             with ManagedHost(approved_previous_profile=args.reuse_approved_profile) as host:
                 result = host.status()
                 # Only lifecycle fields, never raw manifests/profile identifiers.
@@ -266,7 +388,7 @@ def main(argv=None):
     except Exception as error:
         # Never show RPC/CDP payloads, stderr, account information or profile data.
         code = str(error) if isinstance(error, (ManagerError, HostError, CDPError)) else 'unexpected_manager_failure'
-        print('未完成：' + code + '。请按说明核验专用实例；不代表卸载已通过。', file=sys.stderr)
+        print('未完成：' + code + '。请按说明核验当前模式；不代表已成功挂载或清理。', file=sys.stderr)
         return 1
 
 

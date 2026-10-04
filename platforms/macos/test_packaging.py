@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -69,7 +71,48 @@ class PackagingTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(manifest))
         self.assertEqual(stat.S_IMODE((app / 'Contents/MacOS/codex-usage-bar').stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE((payload / 'platforms/macos/Start.command').stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE((payload / 'platforms/macos/Test.command').stat().st_mode), 0o755)
         install.verify_owned_app(app)
+
+    def test_app_launcher_defaults_to_daily_start_command(self):
+        app = self.root / 'app.app'
+        build.build_app(app, _source_root=self.source)
+        wrapper = (app / 'Contents/MacOS/codex-usage-bar').read_text()
+        self.assertIn('/platforms/macos/Start.command', wrapper)
+        self.assertNotIn('/platforms/macos/Test.command', wrapper)
+        self.assertIn('codex_bar/daily_host.py', build.PAYLOAD_FILES)
+        self.assertIn('tests/test_daily_host.py', build.SOURCE_EXTRA_FILES)
+
+    @unittest.skipUnless(shutil.which('zsh'), 'zsh is required to exercise macOS launchers')
+    def test_launchers_dispatch_to_daily_or_explicit_isolated_mode(self):
+        # Execute the exact shipped shell scripts against a harmless fixture module.
+        # No real manager is imported and no Codex app or profile is opened.
+        module = self.source / 'codex_bar/__main__.py'
+        module.write_text('import json, sys\nfrom pathlib import Path\n'
+                          'print(json.dumps({"arguments": sys.argv[1:], '
+                          '"environmentIgnored": sys.flags.ignore_environment, '
+                          '"userSiteDisabled": sys.flags.no_user_site, '
+                          '"bytecodeDisabled": sys.dont_write_bytecode, '
+                          '"correctWorkingDirectory": Path.cwd() == Path(__file__).resolve().parent.parent}))\n')
+        commands = {
+            'Start.command': ['daily', '--acknowledge-runtime', '--wait-for-exit'],
+            'Test.command': ['run', '--acknowledge-runtime', '--duration', '0'],
+        }
+        for name, expected in commands.items():
+            with self.subTest(command=name):
+                script = self.source / 'platforms/macos' / name
+                script.write_bytes((MACOS / name).read_bytes())
+                result = subprocess.run([shutil.which('zsh'), str(script)],
+                                        text=True, capture_output=True, timeout=15)
+                if result.returncode and 'Python 3.12 or later is required.' in result.stderr:
+                    self.skipTest('No launcher-supported Python 3.12+ location on this test host')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                output = json.loads(result.stdout.splitlines()[-1])
+                self.assertEqual(output['arguments'], expected)
+                for flag in ('environmentIgnored', 'userSiteDisabled', 'bytecodeDisabled',
+                             'correctWorkingDirectory'):
+                    self.assertTrue(output[flag], flag)
+        self.assertFalse(list(self.source.rglob('*.pyc')))
 
     def test_package_version_is_shared_by_bundle_and_manifest(self):
         (self.source / 'codex_bar/__init__.py').write_text('__version__ = "1.2.3"\n')
@@ -226,6 +269,20 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(install.InstallError, 'manager_is_running'):
                 self.installer.uninstall()
         self.assertTrue(self.installer.app.is_dir())
+
+    def test_upgrade_refuses_live_shared_manager_without_changing_app_or_receipt(self):
+        self.installer.install(reuse_approved_profile=True)
+        receipt = self.installer.receipt_path.read_bytes()
+        old_asset = self.installer.app / 'Contents/Resources/codex-usage-bar/web/bar.js'
+        old_content = old_asset.read_bytes()
+        (self.source / 'web/bar.js').write_text('new release')
+        with (self.installer.support / 'manager.lock').open('r+') as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaisesRegex(install.InstallError, 'manager_is_running'):
+                self.installer.install()
+        self.assertEqual(old_asset.read_bytes(), old_content)
+        self.assertEqual(self.installer.receipt_path.read_bytes(), receipt)
+        self.assertFalse(self.installer.backups.exists())
 
     def test_active_profile_is_refused_without_app_mutation(self):
         self.installer.install()

@@ -404,6 +404,35 @@ class CommandTests(unittest.TestCase):
                 session.attach_codex_page()
             self.assertEqual(len(sock.sent), 1)
 
+    def test_daily_route_option_accepts_only_one_exact_app_origin_and_omits_url(self):
+        targets = [
+            {'targetId': 'external', 'type': 'page', 'url': 'https://example.invalid'},
+            {'targetId': 'owned', 'type': 'page', 'url': 'app://-/threads/PRIVATE'},
+        ]
+        incoming = frame({'id': 1, 'result': {'targetInfos': targets}})
+        incoming += frame({'id': 2, 'result': {'sessionId': 'daily-session'}})
+        session, sock = direct_session(incoming)
+        page = session.attach_codex_page(allow_application_routes=True)
+        self.assertEqual(page.target_id, 'owned')
+        self.assertNotIn('PRIVATE', repr(page))
+        self.assertNotIn(b'PRIVATE', b''.join(sock.sent))
+
+    def test_daily_route_option_still_refuses_multiple_app_pages(self):
+        targets = [
+            {'targetId': 'one', 'type': 'page', 'url': 'app://-/threads/PRIVATE'},
+            {'targetId': 'two', 'type': 'page', 'url': 'app://-/index.html'},
+        ]
+        session, sock = direct_session(frame({'id': 1, 'result': {'targetInfos': targets}}))
+        with self.assertRaises(cdp.CDPError):
+            session.attach_codex_page(allow_application_routes=True)
+        self.assertEqual(len(sock.sent), 1)
+
+    def test_daily_route_option_requires_boolean(self):
+        session, sock = direct_session(b'')
+        with self.assertRaises(cdp.CDPError):
+            session.attach_codex_page(allow_application_routes=1)
+        self.assertEqual(sock.sent, [])
+
     def test_retries_only_empty_app_inventory_then_attaches_within_deadline(self):
         target = {"targetId": "owned", "type": "page", "url": "app://-/"}
         incoming = frame({"id": 1, "result": {"targetInfos": []}})

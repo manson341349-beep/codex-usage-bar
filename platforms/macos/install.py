@@ -275,7 +275,7 @@ class Installer:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--use-approved-project-profile', action='store_true',
-                        help='reuse only the validated fixed predecessor profile in place (local migration)')
+                        help='keep the validated predecessor profile for optional Test.command mode only')
     parser.add_argument('--uninstall', action='store_true',
                         help='remove only this receipted app; retain backup, state and login profiles')
     args = parser.parse_args(argv)
@@ -294,6 +294,8 @@ def main(argv=None) -> int:
         print('Installation not completed: ' + code, file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2))
+    if not args.uninstall:
+        print('The app launches daily Codex with its existing login and history. Test.command is isolated opt-in.')
     print('No Codex.app files, autostart settings, or signing settings were changed.')
     return 0
 

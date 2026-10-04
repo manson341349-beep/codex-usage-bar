@@ -387,14 +387,19 @@ class BrowserSession:
         finally:
             self._lock.release()
 
-    def attach_codex_page(self, *, wait_timeout: float = 20.0) -> AttachedPage:
-        """Wait for one canonical application page, never a conversation URL.
+    def attach_codex_page(self, *, wait_timeout: float = 20.0,
+                          allow_application_routes: bool = False) -> AttachedPage:
+        """Wait for one canonical application page without returning its URL.
 
         A listening browser endpoint can precede page creation. Only zero app
         pages is retried; ambiguity, unexpected routes and invalid metadata fail
         immediately. A separate manager guard must still verify the empty home
         composer because a client-side route need not appear in the target URL.
+        Daily mode may opt into other routes at the same exact app://- origin;
+        this does not grant permission to mount on or read conversation content.
         """
+        if type(allow_application_routes) is not bool:
+            raise CDPError("Invalid application route option.")
         deadline = time.monotonic() + _duration(wait_timeout)
         while True:
             result = self.call("Target.getTargets", timeout=min(self._timeout, _remaining(deadline)))
@@ -416,7 +421,7 @@ class BrowserSession:
                     raise CDPError("Invalid browser target metadata.") from None
                 if parsed.scheme != "app" or parsed.netloc != "-":
                     continue
-                if url not in ("app://-/", "app://-/index.html"):
+                if not allow_application_routes and url not in ("app://-/", "app://-/index.html"):
                     raise CDPError("Unexpected Codex application route.")
                 target_id = target.get("targetId")
                 if not isinstance(target_id, str) or not _ID.fullmatch(target_id):

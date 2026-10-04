@@ -1,71 +1,73 @@
 # codex-usage-bar
 
-Codex 桌面端的独立额度信息栏，带原创 SVG 角色 Milo。当前版本 **0.3.0，实验性，仅支持 macOS**。仓库名称统一为 `codex-usage-bar`；Windows 仅预留平台目录，尚未实现或验证。
+Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.4.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
 
-> **当前仅在专用隔离实例的空白首页显示。开始输入、输入法组合输入、进入对话页面时会卸载横条。真实工作事件和当前会话缓存尚未接入。** Milo 动画不表示模型正在工作；这不是全功能成品，也不是 OpenAI 官方产品。
+> **默认入口现在使用你的日常账号、历史、设置和项目，不再启动独立测试资料。** 这是原版 Codex 的启动伴侣，不修改官方应用安装包。第一次启用需要正常退出正在运行的 Codex，再经本启动器打开；已有任务不会被强制结束。
+>
+> **信息栏仍仅显示在空白首页。** 输入、输入法组合输入或进入对话时会卸载。真实工作事件、当前会话缓存和 Windows 实现尚未接入。当前日常模式的测试范围见 [验证记录](docs/VALIDATION.md)。
 
-## 当前能力与边界
+## 安装并在日常 Codex 使用
 
-- 在原生首页输入框上方的专用 portal 挂载 Shadow DOM 信息栏；不替换输入框。
-- 通过官方 Codex CLI 的只读 `account/read` 和 `account/rateLimits/read` 获取订阅额度，约每 60 秒刷新一次。读数表示**已使用百分比**。
-- 5 小时或每周窗口缺失、身份不明、超时、过期、到达重置时间时显示未知或明确状态；**缺数据不代表无限制**。本版没有账户绑定的“用户确认无限制”设置。
-- 当前会话缓存固定显示“当前来源未提供”；真实工作状态显示“未接入”。hover、点击或键盘聚焦信息按钮可展开来源说明。
-- 动画使用 `requestAnimationFrame`，支持减少动态效果。回调频率随显示器和窗口状态变化，不承诺 GPU 稳定 60 fps。
-- DOM 结构属于 Codex 内部实现，应用更新可能使信息栏拒绝挂载。只支持唯一、可见且无内容的首页输入框。
+需要官方 `/Applications/Codex.app`、已有 Python 3.12+，以及已经使用过的默认资料目录：`~/.codex` 和 `~/Library/Application Support/Codex`。本版不支持自定义资料路径；不复制登录、创建替代账号或要求重新登录。
 
-## macOS 安装
-
-前提：官方 `/Applications/Codex.app`、已安装的 Python 3.12 或以上。构建和安装不下载依赖，不打包 Codex 或 Python。Node.js 仅用于开发测试。
-
-解压源码发布包，在目录中执行：
+解压源码包，在源码目录执行：
 
 ```sh
 python3 platforms/macos/install.py
 ```
 
-安装位置为 `~/Applications/codex-usage-bar.app`，私有运行状态位于 `~/Library/Application Support/codex-usage-bar`。这是未签名、未公证的本机源码启动器；不修改 Codex.app 的签名，不绕过 Gatekeeper，不添加自启动项，也不申请新的系统敏感权限。
-
-首次使用在**专用实例**中由本人登录。安装后运行：
-
-```sh
-cd "$HOME/Applications/codex-usage-bar.app/Contents/Resources/codex-usage-bar"
-python3 -E -s -B -m codex_bar login --acknowledge-runtime
-```
-
-登录完成后按 `Ctrl-C` 关闭专用实例并保留其资料。之后在 Finder 双击 `codex-usage-bar.app`，或执行：
+随后双击 `~/Applications/codex-usage-bar.app`，或运行：
 
 ```sh
 open "$HOME/Applications/codex-usage-bar.app"
 ```
 
-启动器打开终端并运行专用 Codex。**退出时在该终端按 `Ctrl-C`**，等待清理完成后再关终端。启动器自动寻找常见位置的 Python 3.12+；命令行中的 `python3` 也必须满足这一版本要求。
+启动器会打开一个终端。如果日常 Codex 正在运行，先保存工作、等待运行任务结束，然后 **Cmd-Q 正常退出 Codex**；启动器会等待其退出，再用原资料重新打开同一份官方应用。回到空白首页可显示信息栏。如果日常实例本来就是由这个启动器打开，重新启动信息栏会验证并重连，不会再开第二个实例。
 
-需要限时运行或查看状态时，在安装资源目录执行：
+以后通过 **codex-usage-bar.app** 打开日常 Codex。直接从官方 Codex 图标冷启动，不会自动加上信息栏需要的调试参数；此时需先正常退出，再用本启动器打开。不会添加开机自启动，也不替换系统 Dock 项目或官方 Codex 文件。
+
+**退出行为：** 在启动器终端按 `Ctrl-C` 只移除信息栏并停止其额度刷新，日常 Codex 继续运行。要关闭本地调试端口，请正常退出 Codex（Cmd-Q）。从启动器打开的本地调试端口仅监听 `127.0.0.1`；它仍具有调试能力，不能向不可信程序开放。信息栏出错时也不会杀掉日常任务。
+
+这是未签名、未公证的本机源码启动器，需要外部 Python 与 Codex。安装不下载依赖、不改签名、不绕过 Gatekeeper、不添加自启动项或新的系统敏感权限。
+
+## 当前能力与限制
+
+- 在原生首页输入框上方的 portal 挂载 Shadow DOM；不替换输入框，不读取输入正文或聊天内容。
+- 经官方 CLI 的只读 `account/read` 和 `account/rateLimits/read` 获取订阅额度，约每 60 秒刷新。显示**已使用百分比**。
+- 5h 或每周窗口缺失、身份不明、数据过期或待重置时明确显示未知/状态；**缺数据不表示无限制**。没有账户绑定的“用户确认无限制”设置。
+- 会话缓存显示“当前来源未提供”；真实工作事件显示未接入。Milo 动画不表示模型正在生成。
+- hover、点击、键盘聚焦可查看来源说明。动画用 rAF 并尊重减少动态效果；不承诺 GPU 稳定 60 fps。
+- 支持单个 Codex 应用页面和默认资料路径。DOM 是 Codex 内部接口，应用升级后可能拒绝挂载。恢复到对话页时等待用户回到空白首页，不改变现有页面。
+- 启动或连接失败会保留日常 Codex；如果它已经带调试参数打开，端口需随本人 Cmd-Q 关闭。不会为修复横条而强退应用。
+
+## 独立测试模式
+
+0.3.0 的独立测试模式仍保留，但不再是 `.app` 默认入口。只在需要测试时打开安装资源中的 `platforms/macos/Test.command`。该模式采用独立资料，Ctrl-C 会关闭其专用实例；日常模式不会这样做。
+
+源码下的 `run`、`login`、`status`、`cleanup` 仍仅指独立测试模式。`daily` 与 `daily-status` 指日常模式。例如：
 
 ```sh
-python3 -E -s -B -m codex_bar run --acknowledge-runtime --duration 30
-python3 -E -s -B -m codex_bar status
+python3 -B -m codex_bar daily --acknowledge-runtime --wait-for-exit
+python3 -B -m codex_bar daily-status
 ```
 
-`--acknowledge-runtime` 表示操作者已同意本次专用实例运行与本地调试访问。源码开发模式使用项目自己的 `.state/`。迁移选项 `--use-approved-project-profile` 只用于此前已批准且已验证关闭的相邻原型专用资料，按固定清单原位复用，不接受任意路径，也不复制认证文件；普通新安装不需要此选项。
+`--acknowledge-runtime` 表示操作者已同意本次本机调试接入。迁移安装选项 `--use-approved-project-profile` 只影响独立 Test 模式的已验证旧资料绑定，日常模式使用原有默认资料。
 
-## 卸载与恢复
+## 升级、卸载与恢复
 
-先按 `Ctrl-C` 停止运行，再从保留的源码目录执行：
+先在信息栏所属终端按 Ctrl-C，使管理器退出。安装器发现管理器锁被占用时会拒绝覆盖。重新运行安装命令升级；旧 `.app` 会保留在 `~/Applications/.codex-usage-bar-backups/`，原有资料不迁移。
+
+从保留的源码目录卸载：
 
 ```sh
 python3 platforms/macos/install.py --uninstall
 ```
 
-卸载仅移走有本项目安装收据的 `.app`，旧应用留在 `~/Applications/.codex-usage-bar-backups/`，登录资料和私有运行状态保留。升级也保留可恢复备份。重新运行安装命令会恢复入口，并沿用已验证的资料绑定；不要手工覆盖安装收据或从其它账户复制登录资料。
+卸载移走带有本项目收据的 `.app`，保留备份、私有运行状态与全部登录资料；不会关闭正在运行的日常 Codex，已有调试端口仍需本人退出 Codex 才关闭。重新安装可恢复入口。需要完全回到原来用法时，正常退出 Codex 后从官方图标启动即可，不需要修复官方安装包。
 
-## 数据与访问
+## 数据与开发
 
-管理器只连接自己启动并核验过的专用进程，调试端口仅监听 `127.0.0.1`。CDP 可控制应用，因此不要向不可信程序开放调试端口。日常 Codex 实例不作为连接目标。退出会卸载自有 DOM、关闭专用进程和端口，并保留专用资料供下次使用。
-
-不读取聊天正文、历史记录或输入文本；首页是否为空仅检查节点结构。额度桥接短暂处理官方账户元数据以生成内存身份指纹，不对外暴露身份，不把额度存成磁盘缓存。官方 Codex 处理其自身登录和网络访问；本项目不发送模型请求。公开仓库和包不包含认证文件、会话日志、真实额度截图或私人验收证据。
-
-## 开发与验证
+额度桥接仅在内存用官方账户元数据生成身份指纹，不输出身份或记录磁盘额度缓存。官方 Codex 自行处理登录和网络；本项目不读取认证文件、聊天历史或输入文本，不发送模型生成请求。生命周期文件只记录验证进程归属所需的本机元数据，留在私有支持目录，不上传。
 
 ```sh
 python3 scripts/validate.py
@@ -73,11 +75,9 @@ python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
 node --test tests/test_frontend.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.3.0-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.4.0-source.zip
 ```
 
-构建输出 `dist/codex-usage-bar.app`，只打包列出的源码和资源；现有目标不会被覆盖。开发测试使用人工构造数据，不等同真实模型工作事件验收。手动修改前端后需重新审查并更新 `web/asset-manifest.json`。
+构建只复制白名单文件，拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 是原创前端，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
 
-目录：`codex_bar/` 为额度与进程管理，`web/` 为原创前端，`platforms/macos/` 为当前平台入口，`platforms/windows/` 为未来规划。共享逻辑应与平台实现分离。
-
-源码与原创视觉资源采用 [MIT License](LICENSE)，来源范围见 [PROVENANCE](docs/PROVENANCE.md) 与 [NOTICE](NOTICE.md)。Codex、Python 及系统组件分别由其权利人授权，不随本项目分发。
+本项目独立于 OpenAI。自有代码与原创视觉资源采用 [MIT License](LICENSE)，来源范围见 [PROVENANCE](docs/PROVENANCE.md) 和 [NOTICE](NOTICE.md)。不分发或重新授权 Codex、Python、系统组件或早期参考软件。

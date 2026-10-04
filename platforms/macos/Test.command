@@ -5,11 +5,9 @@ script_dir=${0:A:h}
 resource_root=${script_dir:h:h}
 cd "$resource_root"
 
-print 'codex-usage-bar'
-print 'Starts your regular Codex with its existing login, settings, and conversation history.'
-print 'If Codex is already open, save your work and quit it with Cmd-Q once; this launcher waits.'
-print 'Press Ctrl-C here to remove the bar and leave Codex running.'
-print 'The local debug port stays open until you quit Codex with Cmd-Q.'
+print 'codex-usage-bar — isolated test mode'
+print 'This terminal owns the dedicated test Codex session. Press Ctrl-C to stop it.'
+print 'This optional test mode uses its separate profile, not your regular Codex login or history.'
 print ''
 
 python_path=''
@@ -27,4 +25,4 @@ if [[ -z "$python_path" ]]; then
 fi
 
 # Ignore Python environment overrides and user-site packages; leave no .pyc in the app.
-exec "$python_path" -E -s -B -m codex_bar daily --acknowledge-runtime --wait-for-exit
+exec "$python_path" -E -s -B -m codex_bar run --acknowledge-runtime --duration 0

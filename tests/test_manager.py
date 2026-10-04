@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from codex_bar.manager import (ASSET_NAMES, ManagerError, Renderer, main,
-                               read_assets, install_expression, run_foreground)
+                               read_assets, install_expression, run_foreground, run_daily)
 from codex_bar.host import HostError
 
 
@@ -212,6 +212,130 @@ class ManagerTests(unittest.TestCase):
         renderer.dispose.assert_called_once()
         host.stop.assert_called_once()
         self.assertLess(clock[0],11.3)
+
+
+class DailyManagerTests(unittest.TestCase):
+    def setUp(self):
+        self.host = MagicMock()
+        self.host.__enter__.return_value = self.host
+        self.host.quota_home = Path('/fixture/.codex')
+        self.host.launch_or_attach.return_value = SimpleNamespace(port=12345)
+        self.host.is_running.return_value = True
+        self.host.detach.return_value = {'appLeftRunning': True}
+
+    def test_refuses_active_foreign_instance_without_closing_it(self):
+        self.host.launch_or_attach.side_effect = HostError('daily_instance_running')
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}):
+            with self.assertRaisesRegex(HostError, 'daily_instance_running'):
+                run_daily()
+        self.host.stop.assert_not_called()
+
+    def test_wait_can_be_cancelled_without_starting_or_stopping_codex(self):
+        stop = [False]
+        def cancel(_):
+            stop[0] = True
+        self.host.launch_or_attach.side_effect = HostError('daily_instance_running')
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.stop_signals') as signals, \
+             patch('codex_bar.manager.time.sleep', side_effect=cancel), patch('builtins.print'):
+            signals.return_value.__enter__.return_value = stop
+            run_daily(wait_for_exit=True)
+        self.host.launch_or_attach.assert_called_once()
+        self.host.stop.assert_not_called()
+        self.host.detach.assert_not_called()
+
+    def test_connection_failure_detaches_and_never_stops_daily_codex(self):
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.BrowserSession.connect', side_effect=ManagerError('fixture')), \
+             patch('builtins.print'):
+            with self.assertRaisesRegex(ManagerError, 'fixture'):
+                run_daily(duration=1)
+        self.host.detach.assert_called_once()
+        self.host.stop.assert_not_called()
+
+    def test_daily_deadline_disposes_bar_but_preserves_app_and_uses_daily_quota_home(self):
+        clock = [0.0]
+        renderer = MagicMock()
+        renderer.update.return_value = {'mounted': True, 'visible': True}
+        worker = MagicMock()
+        worker.submit.return_value.done.return_value = False
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.BrowserSession') as browser, \
+             patch('codex_bar.manager.Renderer', return_value=renderer), \
+             patch('codex_bar.manager.CodexQuotaClient') as quota, \
+             patch('codex_bar.manager.QuotaBridge'), \
+             patch('codex_bar.manager.ThreadPoolExecutor', return_value=worker), \
+             patch('codex_bar.manager.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('codex_bar.manager.time.sleep', side_effect=lambda s: clock.__setitem__(0, clock[0]+s)), \
+             patch('builtins.print'):
+            run_daily(duration=1)
+        quota.assert_called_once_with(codex_home=Path('/fixture/.codex'))
+        browser.connect.return_value.attach_codex_page.assert_called_once_with(allow_application_routes=True)
+        renderer.dispose.assert_called_once()
+        browser.connect.return_value.close.assert_called_once()
+        self.host.detach.assert_called_once()
+        self.host.stop.assert_not_called()
+
+    def test_user_quitting_app_is_normal_and_skips_disposing_dead_renderer(self):
+        self.host.is_running.return_value = False
+        self.host.detach.return_value = {'appLeftRunning': False}
+        renderer = MagicMock()
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.BrowserSession'), \
+             patch('codex_bar.manager.Renderer', return_value=renderer), \
+             patch('codex_bar.manager.CodexQuotaClient'), \
+             patch('codex_bar.manager.QuotaBridge'), \
+             patch('codex_bar.manager.ThreadPoolExecutor'), patch('builtins.print'):
+            run_daily(duration=1)
+        renderer.dispose.assert_not_called()
+        self.host.stop.assert_not_called()
+        self.host.detach.assert_called_once()
+
+    def test_daily_ack_and_mixed_profile_flags_are_rejected_before_actions(self):
+        for args in (['daily'], ['daily', '--acknowledge-runtime', '--reuse-approved-profile'],
+                     ['status', '--wait-for-exit']):
+            with patch('codex_bar.manager.DailyHost') as host, patch('sys.stderr'), self.assertRaises(SystemExit):
+                main(args)
+            host.assert_not_called()
+
+    def test_liveness_failure_cannot_skip_transport_worker_or_host_cleanup(self):
+        self.host.is_running.side_effect = HostError('process_inspection_failed')
+        worker = MagicMock()
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.BrowserSession') as browser, \
+             patch('codex_bar.manager.Renderer'), \
+             patch('codex_bar.manager.CodexQuotaClient'), \
+             patch('codex_bar.manager.QuotaBridge'), \
+             patch('codex_bar.manager.ThreadPoolExecutor', return_value=worker), patch('builtins.print'):
+            with self.assertRaisesRegex(HostError, 'process_inspection_failed'):
+                run_daily(duration=1)
+        browser.connect.return_value.close.assert_called_once()
+        worker.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        self.host.detach.assert_called_once()
+        self.host.stop.assert_not_called()
+
+    def test_quit_racing_renderer_disposal_is_normal_if_all_owned_processes_and_port_gone(self):
+        self.host.is_running.side_effect = [False, True]
+        self.host.detach.return_value = {'status': 'stopped', 'appLeftRunning': False,
+                                       'ownedProcessCount': 0, 'debugPortOpen': False}
+        renderer = MagicMock()
+        renderer.dispose.side_effect = ManagerError('renderer_gone')
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.BrowserSession'), \
+             patch('codex_bar.manager.Renderer', return_value=renderer), \
+             patch('codex_bar.manager.CodexQuotaClient'), \
+             patch('codex_bar.manager.QuotaBridge'), \
+             patch('codex_bar.manager.ThreadPoolExecutor'), patch('builtins.print'):
+            run_daily(duration=1)
+        self.host.detach.assert_called_once()
+        self.host.stop.assert_not_called()
 
 
 if __name__ == '__main__':
