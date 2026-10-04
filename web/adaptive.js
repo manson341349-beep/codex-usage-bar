@@ -15,6 +15,8 @@
   const MAX_ANCESTORS = 64;
   const EPSILON = 0.5;
   const SOURCE = 'Codex 订阅额度 · 官方 account/rateLimits/read';
+  const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const CACHE_STALE_MS = 120000;
   const GLOBAL_STATES = new Set([
     'waiting', 'fresh', 'partial', 'unavailable', 'stale', 'expired',
     'reset_pending', 'identity_unknown', 'account_changed',
@@ -171,6 +173,11 @@
     let hiddenFingerprint = null;
     let naturalHeight = 0;
     let currentTheme = null;
+    // Only the selected conversation identifier and numeric usage live here.
+    // No conversation records, titles, messages or log files are requested.
+    let cacheThread = null;
+    let cacheHost = null;
+    let cacheReading = null;
     const knownHosts = new WeakSet();
     const listeners = [];
     const observed = new Set();
@@ -209,7 +216,7 @@
         return { reason: 'unsupported-portal-flow' };
       }
       // The isolated home-only mode rejects an association using a structural
-      // selector. Persistent mode never inspects its value or any conversation ID.
+      // selector. Daily cache binding reads only the selected portal's UUID.
       if (homeOnly && portal.hasAttribute('data-above-composer-conversation-id') &&
           !portal.matches('[data-above-composer-conversation-id=""]')) {
         return { reason: 'conversation-associated' };
@@ -225,9 +232,77 @@
       return { root: root, portal: portal, editor: editors[0], placement: placement };
     }
 
+    function syncCacheThread() {
+      let id = null;
+      let hostId = null;
+      if (!homeOnly) {
+        try {
+          const selected = candidate();
+          const value = selected.portal && selected.placement === 'thread' &&
+            selected.portal.getAttribute('data-above-composer-conversation-id');
+          if (typeof value === 'string' && THREAD_ID.test(value)) id = value.toLowerCase();
+          if (id) {
+            const rows = Array.from(document.querySelectorAll(
+              '[data-app-action-sidebar-thread-id="local:' + id + '"][data-app-action-sidebar-thread-kind="local"]'
+            )).filter(node => {
+              const chain = ancestorChain(node);
+              return chain !== null && !chain.some(parent =>
+                parent.getAttribute('data-app-shell-active-page') === 'false');
+            });
+            const hosts = rows.map(node => node.getAttribute('data-app-action-sidebar-thread-host-id'));
+            if (hosts.length && hosts.every(value => typeof value === 'string' && value.length > 0 &&
+                value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value)) && new Set(hosts).size === 1) {
+              hostId = hosts[0];
+            }
+          }
+        } catch (_) { /* Optional statistics cannot break the account bar. */ }
+      }
+      if (id !== cacheThread || hostId !== cacheHost) {
+        cacheThread = id;
+        cacheHost = hostId;
+        cacheReading = null;
+      }
+      return id;
+    }
+
+    function cacheSnapshot(disconnected) {
+      const selected = syncCacheThread();
+      const empty = { status: disconnected ? 'disconnected' : selected ? 'waiting' : 'unavailable',
+        inputTokens: null, cachedInputTokens: null, observedAt: null };
+      if (disconnected || !selected || !cacheHost || !cacheReading) return empty;
+      return { status: window.performance.now() - cacheReading.receivedAt >= CACHE_STALE_MS ? 'stale' : 'fresh',
+        inputTokens: cacheReading.inputTokens, cachedInputTokens: cacheReading.cachedInputTokens,
+        observedAt: cacheReading.observedAt };
+    }
+
+    function receiveCache(event) {
+      // The official preload dispatches a local MessageEvent with null source
+      // and empty origin. Never intercept, serialize or retain other messages.
+      if (disposed || homeOnly || event.source !== null || event.origin !== '') return;
+      try {
+        const data = event.data;
+        if (!data || data.type !== 'mcp-notification' || data.method !== 'thread/tokenUsage/updated') return;
+        const params = data.params;
+        const selected = syncCacheThread();
+        if (!selected || !params || typeof params.threadId !== 'string' ||
+            params.threadId.toLowerCase() !== selected) return;
+        const hostId = data.hostId;
+        if (!cacheHost || hostId !== cacheHost) return;
+        const usage = params.tokenUsage && params.tokenUsage.total;
+        const input = usage && usage.inputTokens;
+        const cached = usage && usage.cachedInputTokens;
+        cacheReading = Number.isSafeInteger(input) && input > 0 &&
+          Number.isSafeInteger(cached) && cached >= 0 && cached <= input ?
+          { inputTokens: input, cachedInputTokens: cached, observedAt: Date.now(), receivedAt: window.performance.now() } : null;
+        flush();
+      } catch (_) { /* A malformed optional event never changes the composer. */ }
+    }
+
     function snapshot() {
       if (window.performance.now() - lastHeartbeat >= HEARTBEAT_MS) {
-        return emptySnapshot('disconnected');
+        const disconnected = emptySnapshot('disconnected');
+        disconnected.cache = cacheSnapshot(true);
+        return disconnected;
       }
       const output = sanitize(latest);
       const now = Date.now() / 1000;
@@ -242,6 +317,7 @@
           }
         }
       }
+      output.cache = cacheSnapshot(false);
       return output;
     }
 
@@ -445,7 +521,7 @@
       reconciling = true;
       try {
         const next = candidate();
-        if (!next.root) { unmount(next.reason); return; }
+        if (!next.root) { refreshSnapshot(); unmount(next.reason); return; }
         if (host && (!host.isConnected || host.parentElement !== next.portal || !target ||
             target.root !== next.root || target.portal !== next.portal || target.editor !== next.editor)) {
           unmount(homeOnly ? 'home-replaced' : 'composer-replaced');
@@ -491,6 +567,7 @@
       for (const item of listeners.splice(0)) item[0].removeEventListener(item[1], item[2], item[3]);
       try { unmount('disposed'); } catch (_) { /* host removal is in unmount's finally */ }
       latest = emptySnapshot('disconnected');
+      cacheThread = cacheHost = cacheReading = null;
       composingEditor = null;
       effective = latest;
       effectiveKey = '';
@@ -513,6 +590,7 @@
       inspect: function () {
         // Fixed state labels and numeric geometry only: no DOM nodes, identifiers or text.
         return { status: state, reason: reason, homeOnly: homeOnly,
+          cacheStatus: effective.cache ? effective.cache.status : 'unavailable',
           layout: layout === null ? null : JSON.parse(JSON.stringify(layout)) };
       },
       dispose: dispose
@@ -537,9 +615,12 @@
         attributeFilter: ['class', 'style', 'hidden', 'inert', 'aria-hidden', 'contenteditable',
           'data-theme', 'data-codex-composer-root', 'data-composer-placement',
           'data-above-composer-portal', 'data-above-composer-conversation-id',
+          'data-app-action-sidebar-thread-id', 'data-app-action-sidebar-thread-kind',
+          'data-app-action-sidebar-thread-host-id', 'data-app-shell-active-page',
           'data-content-search-turn-key', 'data-turn-key']
       });
       listen(window, 'resize', schedule);
+      if (!homeOnly) listen(window, 'message', receiveCache);
       listen(window, 'popstate', schedule);
       listen(window, 'hashchange', schedule);
       listen(window, 'pageshow', schedule);

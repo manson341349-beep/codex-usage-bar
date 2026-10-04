@@ -174,6 +174,34 @@ function mountBar(env) {
   return env.window.CodexUsageBar.mount(container, { theme: 'light', accountOnly: true });
 }
 
+const CACHE_THREAD = '11111111-2222-4333-8444-555555555555';
+const OTHER_CACHE_THREAD = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+const CACHE_HOST = 'offline-cache-host-a';
+const OTHER_CACHE_HOST = 'offline-cache-host-b';
+function cacheSidebarRow(env, threadId = CACHE_THREAD, hostId = CACHE_HOST) {
+  const row = env.document.createElement('div');
+  row.setAttribute('data-app-action-sidebar-thread-id', 'local:' + threadId);
+  row.setAttribute('data-app-action-sidebar-thread-kind', 'local');
+  if (hostId !== null) row.setAttribute('data-app-action-sidebar-thread-host-id', hostId);
+  env.document.body.append(row);
+  return row;
+}
+function cacheEnvironment() {
+  const env = environment();
+  env.composer.setAttribute('data-composer-placement', 'thread');
+  env.portal.setAttribute('data-above-composer-conversation-id', CACHE_THREAD);
+  const row = cacheSidebarRow(env), api = env.install(false);
+  api.setAccountSnapshot(snapshot(env));
+  return { env, row, api, bar: () => env.mounted()?.shadowRoot.querySelector('.cbu-bar') };
+}
+function tokenUsageEvent(inputTokens, cachedInputTokens, overrides = {}) {
+  return { type: 'message', source: null, origin: '', data: {
+    type: 'mcp-notification', method: 'thread/tokenUsage/updated', hostId: CACHE_HOST,
+    params: { threadId: CACHE_THREAD, turnId: 'offline-fixture-turn',
+      tokenUsage: { total: { inputTokens, cachedInputTokens } } }, ...overrides
+  } };
+}
+
 test('quota rendering preserves zero, unknown 5h and unknown cache without using unrelated fields', () => {
   const env = environment({ adapter: false }), bar = mountBar(env);
   const input = snapshot(env); input.limits.primary.usedPercent = 0;
@@ -347,7 +375,7 @@ test('adapter requires an explicit boolean mode', () => {
   const api = env.install(false); assert.equal(api.inspect().homeOnly, false); api.dispose();
 });
 
-test('persistent mode accepts canonical app routes and ignores conversation text and identifier values', () => {
+test('persistent mode accepts canonical routes without conversation text or optional identifier access', () => {
   const env = environment();
   env.composer.setAttribute('data-composer-placement', 'thread');
   env.portal.setAttribute('data-above-composer-conversation-id', 'PRIVATE_IDENTIFIER_DO_NOT_READ');
@@ -523,4 +551,207 @@ test('invalid payloads cannot refresh heartbeat; disposal is complete and idempo
   api.dispose(); api.dispose(); assert.equal(env.mounted(), null); assert.equal(api.setAccountSnapshot(snapshot(env)), false);
   assert.equal(env.document.listenerCount(), 0); assert.equal(env.window.listenerCount(), 0); assert.equal(env.media.listenerCount(), 0);
   assert.equal(env.frames.size + env.timers.size + env.intervals.size, 0);
+});
+
+test('official token usage metadata renders real zero and full cache ratios and copies only counts', () => {
+  const { env, api, bar } = cacheEnvironment();
+  assert.equal(label(bar(), 'cache'), '—'); assert.equal(api.inspect().cacheStatus, 'waiting');
+  const message = tokenUsageEvent(800, 0);
+  env.window.dispatchEvent(message);
+  assert.equal(label(bar(), 'cache'), '0%'); assert.equal(api.inspect().cacheStatus, 'fresh');
+  assert.match(cell(bar(), 'cache').textContent, /当前会话累计/);
+  message.data.params.tokenUsage.total.cachedInputTokens = 800;
+  env.tick(1); assert.equal(label(bar(), 'cache'), '0%');
+  env.window.dispatchEvent(message); assert.equal(label(bar(), 'cache'), '100%');
+  env.window.dispatchEvent(tokenUsageEvent(800, 300)); assert.equal(label(bar(), 'cache'), '37.5%');
+  api.dispose();
+});
+
+test('cache requires the selected UUID and an unambiguous matching sidebar host', () => {
+  const cases = [
+    ['other event host', () => {}, event => { event.data.hostId = OTHER_CACHE_HOST; }],
+    ['missing event host', () => {}, event => { delete event.data.hostId; }],
+    ['other event thread', () => {}, event => { event.data.params.threadId = OTHER_CACHE_THREAD; }],
+    ['missing sidebar host', ({ row }) => row.removeAttribute('data-app-action-sidebar-thread-host-id')],
+    ['empty sidebar host', ({ row }) => row.setAttribute('data-app-action-sidebar-thread-host-id', '')],
+    ['unsafe sidebar host', ({ row }) => row.setAttribute('data-app-action-sidebar-thread-host-id', CACHE_HOST + '\n')],
+    ['ambiguous hosts', ({ env }) => cacheSidebarRow(env, CACHE_THREAD, OTHER_CACHE_HOST)],
+    ['ambiguous missing host', ({ env }) => cacheSidebarRow(env, CACHE_THREAD, null)],
+    ['other sidebar thread', ({ row }) => row.setAttribute('data-app-action-sidebar-thread-id', 'local:' + OTHER_CACHE_THREAD)],
+    ['wrong sidebar kind', ({ row }) => row.setAttribute('data-app-action-sidebar-thread-kind', 'remote')],
+    ['inactive page only', ({ env, row }) => {
+      const oldPage = env.document.createElement('div'); oldPage.setAttribute('data-app-shell-active-page', 'false');
+      env.document.body.append(oldPage); oldPage.append(row);
+    }],
+    ['non UUID portal', ({ env }) => env.portal.setAttribute('data-above-composer-conversation-id', 'chatgpt:' + CACHE_THREAD)],
+    ['home composer', ({ env }) => env.composer.setAttribute('data-composer-placement', 'home')]
+  ];
+  for (const [name, change, changeEvent] of cases) {
+    const fixture = cacheEnvironment(); change(fixture);
+    const event = tokenUsageEvent(800, 300); changeEvent?.(event);
+    fixture.env.window.dispatchEvent(event);
+    assert.equal(label(fixture.bar(), 'cache'), '—', name);
+    assert.notEqual(fixture.api.inspect().cacheStatus, 'fresh', name);
+    fixture.api.dispose();
+  }
+});
+
+test('inactive sidebar copies cannot override the current host and identical host rows remain unambiguous', () => {
+  const { env, api, bar } = cacheEnvironment();
+  const oldPage = env.document.createElement('div'); oldPage.setAttribute('data-app-shell-active-page', 'false');
+  env.document.body.append(oldPage); oldPage.append(cacheSidebarRow(env, CACHE_THREAD, OTHER_CACHE_HOST));
+  cacheSidebarRow(env);
+  env.window.dispatchEvent(tokenUsageEvent(800, 300));
+  assert.equal(label(bar(), 'cache'), '37.5%'); api.dispose();
+});
+
+test('cache accepts only official local message transport and filters unrelated payloads before reading params', () => {
+  const { env, api, bar } = cacheEnvironment();
+  let forbiddenReads = 0;
+  const forbidden = () => { forbiddenReads++; throw new Error('must not inspect unrelated payload'); };
+  for (const transport of [{ source: env.window, origin: '' }, { source: {}, origin: '' },
+    { source: null, origin: 'https://example.invalid' }, { source: null, origin: 'null' }]) {
+    const event = { type: 'message', ...transport };
+    Object.defineProperty(event, 'data', { get: forbidden }); env.window.dispatchEvent(event);
+  }
+  for (const header of [{ type: 'other', method: 'thread/tokenUsage/updated' },
+    { type: 'mcp-notification', method: 'item/agentMessage/delta' },
+    { type: 'mcp-notification', method: 'thread/started' },
+    { marker: 'codex-host-chunked-message-v1', kind: 'chunk' }]) {
+    Object.defineProperty(header, 'params', { get: forbidden });
+    env.window.dispatchEvent({ type: 'message', source: null, origin: '', data: header });
+  }
+  assert.equal(forbiddenReads, 0); assert.equal(label(bar(), 'cache'), '—');
+  env.window.dispatchEvent(tokenUsageEvent(800, 300));
+  assert.equal(label(bar(), 'cache'), '37.5%'); api.dispose();
+});
+
+test('cache never reads body, turn content, unused token fields or usage for another thread or host', () => {
+  const { env, api, bar } = cacheEnvironment();
+  let forbiddenReads = 0;
+  const forbid = (object, key) => Object.defineProperty(object, key, { enumerable: true,
+    get() { forbiddenReads++; throw new Error('forbidden content access'); } });
+  for (const header of [{ threadId: OTHER_CACHE_THREAD }, { hostId: OTHER_CACHE_HOST }]) {
+    const event = tokenUsageEvent(800, 300);
+    if (header.threadId) event.data.params.threadId = header.threadId;
+    if (header.hostId) event.data.hostId = header.hostId;
+    forbid(event.data.params, 'tokenUsage'); env.window.dispatchEvent(event);
+  }
+  const event = tokenUsageEvent(800, 300), params = event.data.params, usage = params.tokenUsage;
+  for (const field of ['body', 'turn', 'items']) forbid(params, field);
+  for (const field of ['body', 'last', 'modelContextWindow']) forbid(usage, field);
+  for (const field of ['body', 'outputTokens', 'totalTokens', 'reasoningOutputTokens', 'percent']) forbid(usage.total, field);
+  env.window.dispatchEvent(event);
+  assert.equal(forbiddenReads, 0); assert.equal(label(bar(), 'cache'), '37.5%'); api.dispose();
+});
+
+test('invalid and fabricated cache numbers clear a previous reading without breaking the bar', () => {
+  const { env, api, bar } = cacheEnvironment();
+  for (const [input, cached] of [[0, 0], [-1, 0], [100, -1], [100, 101], [1.5, 1],
+    [100, 0.5], [Number.MAX_SAFE_INTEGER + 1, 1], [100, Number.MAX_SAFE_INTEGER + 1],
+    [NaN, 0], [100, Infinity], ['100', 50], [100, '50'], [true, 0], [100, false],
+    [null, 0], [100, null], [undefined, 95]]) {
+    env.window.dispatchEvent(tokenUsageEvent(800, 300)); assert.equal(label(bar(), 'cache'), '37.5%');
+    env.window.dispatchEvent(tokenUsageEvent(input, cached));
+    assert.equal(label(bar(), 'cache'), '—'); assert.equal(api.inspect().cacheStatus, 'waiting');
+    assert.equal(api.inspect().status, 'mounted');
+  }
+  const invented = tokenUsageEvent(undefined, undefined);
+  invented.data.params.tokenUsage.total = { percent: 95, usedPercent: 95, hitRate: 0.95 };
+  env.window.dispatchEvent(invented); assert.equal(label(bar(), 'cache'), '—');
+  env.window.dispatchEvent(tokenUsageEvent(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER));
+  assert.equal(label(bar(), 'cache'), '100%'); api.dispose();
+});
+
+test('changing the visible thread clears cache and requires a new matching notification', () => {
+  const { env, row, api, bar } = cacheEnvironment();
+  env.window.dispatchEvent(tokenUsageEvent(800, 300)); assert.equal(label(bar(), 'cache'), '37.5%');
+  env.portal.setAttribute('data-above-composer-conversation-id', OTHER_CACHE_THREAD);
+  row.setAttribute('data-app-action-sidebar-thread-id', 'local:' + OTHER_CACHE_THREAD);
+  env.mutate(); env.flush();
+  assert.equal(label(bar(), 'cache'), '—'); assert.equal(api.inspect().cacheStatus, 'waiting');
+  env.window.dispatchEvent(tokenUsageEvent(800, 800)); assert.equal(label(bar(), 'cache'), '—');
+  const next = tokenUsageEvent(800, 400); next.data.params.threadId = OTHER_CACHE_THREAD;
+  env.window.dispatchEvent(next); assert.equal(label(bar(), 'cache'), '50%');
+  env.portal.setAttribute('data-above-composer-conversation-id', CACHE_THREAD);
+  row.setAttribute('data-app-action-sidebar-thread-id', 'local:' + CACHE_THREAD);
+  env.mutate(); env.flush(); assert.equal(label(bar(), 'cache'), '—'); api.dispose();
+});
+
+test('changing or losing the trusted host clears cached counts even when the thread ID stays the same', () => {
+  const { env, row, api, bar } = cacheEnvironment();
+  env.window.dispatchEvent(tokenUsageEvent(800, 300)); assert.equal(label(bar(), 'cache'), '37.5%');
+  row.setAttribute('data-app-action-sidebar-thread-host-id', OTHER_CACHE_HOST);
+  env.mutate(); env.flush(); assert.equal(label(bar(), 'cache'), '—');
+  env.window.dispatchEvent(tokenUsageEvent(800, 800)); assert.equal(label(bar(), 'cache'), '—');
+  env.window.dispatchEvent(tokenUsageEvent(800, 400, { hostId: OTHER_CACHE_HOST }));
+  assert.equal(label(bar(), 'cache'), '50%');
+  row.remove(); env.mutate(); env.flush(); assert.equal(label(bar(), 'cache'), '—');
+  env.document.body.append(row); env.mutate(); env.flush(); assert.equal(label(bar(), 'cache'), '—');
+  api.dispose();
+});
+
+test('losing a visible composer candidate clears usage before the same composer becomes visible again', () => {
+  const { env, api, bar } = cacheEnvironment();
+  env.window.dispatchEvent(tokenUsageEvent(800, 300)); assert.equal(label(bar(), 'cache'), '37.5%');
+  env.composer.hidden = true; env.mutate(); env.flush();
+  assert.equal(api.inspect().status, 'unmounted'); assert.equal(env.mounted(), null);
+  assert.equal(api.inspect().cacheStatus, 'unavailable');
+  env.composer.hidden = false; env.mutate(); env.flush();
+  assert.equal(api.inspect().status, 'mounted'); assert.equal(label(bar(), 'cache'), '—');
+  assert.equal(api.inspect().cacheStatus, 'waiting'); api.dispose();
+});
+
+test('cache ages after two minutes while account heartbeats remain healthy', () => {
+  const { env, api, bar } = cacheEnvironment();
+  env.window.dispatchEvent(tokenUsageEvent(800, 300));
+  for (let step = 0; step < 12; step++) {
+    env.tick(10000); api.setAccountSnapshot(snapshot(env));
+    assert.equal(api.inspect().cacheStatus, step === 11 ? 'stale' : 'fresh');
+  }
+  assert.equal(label(bar(), 'cache'), '37.5%'); assert.match(cell(bar(), 'cache').textContent, /上次统计/);
+  assert.equal(cell(bar(), 'cache').dataset.stale, 'true');
+  env.window.dispatchEvent(tokenUsageEvent(1000, 400));
+  assert.equal(label(bar(), 'cache'), '40%'); assert.equal(api.inspect().cacheStatus, 'fresh');
+  api.dispose();
+});
+
+test('manager heartbeat loss hides cache and recovery preserves the original observation age', () => {
+  const { env, api, bar } = cacheEnvironment();
+  env.window.dispatchEvent(tokenUsageEvent(800, 300));
+  env.tick(15001);
+  assert.equal(api.inspect().cacheStatus, 'disconnected'); assert.equal(label(bar(), 'cache'), '—');
+  env.tick(105000); api.setAccountSnapshot(snapshot(env));
+  assert.equal(api.inspect().cacheStatus, 'stale'); assert.equal(label(bar(), 'cache'), '37.5%');
+  assert.match(cell(bar(), 'cache').textContent, /上次统计/); api.dispose();
+});
+
+test('account snapshots cannot forge usage statistics or cause upstream cache fields to be read', () => {
+  const { env, api, bar } = cacheEnvironment();
+  let forbiddenReads = 0;
+  const account = snapshot(env);
+  Object.defineProperty(account, 'cache', { get() { forbiddenReads++; throw new Error('upstream cache is not trusted'); } });
+  assert.equal(api.setAccountSnapshot(account), true); assert.equal(forbiddenReads, 0);
+  assert.equal(label(bar(), 'cache'), '—');
+  const forged = snapshot(env, { cache: { status: 'fresh', inputTokens: 100, cachedInputTokens: 95, percent: 95 } });
+  api.setAccountSnapshot(forged); assert.equal(label(bar(), 'cache'), '—');
+  env.window.dispatchEvent(tokenUsageEvent(800, 300));
+  api.setAccountSnapshot(forged); assert.equal(label(bar(), 'cache'), '37.5%'); api.dispose();
+});
+
+test('inspection exposes no cache identity or counts and disposal releases the passive listener', () => {
+  const { env, api } = cacheEnvironment();
+  assert.equal(env.window.events.get('message').size, 1);
+  env.window.dispatchEvent(tokenUsageEvent(987654321, 123456789));
+  const inspection = api.inspect(), serialized = JSON.stringify(inspection);
+  assert.equal(inspection.cacheStatus, 'fresh');
+  for (const privateValue of [CACHE_THREAD, CACHE_HOST, '987654321', '123456789',
+    'inputTokens', 'cachedInputTokens', 'threadId', 'hostId']) assert.equal(serialized.includes(privateValue), false);
+  assert.deepEqual(Object.keys(inspection).sort(), ['cacheStatus', 'homeOnly', 'layout', 'reason', 'status']);
+  api.dispose(); assert.equal(env.window.events.get('message').size, 0); assert.equal(env.window.listenerCount(), 0);
+  env.window.dispatchEvent(tokenUsageEvent(100, 100)); assert.equal(env.mounted(), null);
+  assert.equal(env.frames.size + env.timers.size + env.intervals.size, 0);
+  assert.equal(api.inspect().cacheStatus, 'unavailable');
+  const isolated = environment(), isolatedApi = isolated.install();
+  assert.equal(isolated.window.events.get('message')?.size ?? 0, 0); isolatedApi.dispose();
 });

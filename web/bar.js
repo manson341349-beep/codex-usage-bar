@@ -4,6 +4,7 @@
 
   var nextId = 0;
   var MAX_TIMEOUT = 2147483647;
+  var CACHE_STATUSES = ['fresh', 'stale', 'waiting', 'unavailable', 'disconnected'];
   var BLOCKED = ['waiting', 'unavailable', 'disconnected', 'expired', 'unknown', 'missing', 'identity_unknown', 'account_changed', 'api_key_unsupported'];
   var STATUS_LABELS = {
     fresh: '数据已更新', partial: '部分窗口可用', stale: '保留的旧数据',
@@ -38,6 +39,7 @@
   }
 
   function finiteNumber(value) { return typeof value === 'number' && Number.isFinite(value); }
+  function nonnegativeInteger(value) { return Number.isSafeInteger(value) && value >= 0; }
   function textValue(value, fallback) {
     return typeof value === 'string' && value.trim() ? value.trim().slice(0, 180) : fallback;
   }
@@ -84,17 +86,19 @@
     pet.innerHTML = robot;
     var metrics = element(document, 'div', 'cbu-metrics');
     var cells = {};
-    [['secondary', '每周已用'], ['primary', '5 小时已用'], ['cache', 'Cache']].forEach(function (item) {
+    [['secondary', '每周订阅已用'], ['primary', '5 小时已用'], ['cache', '缓存命中']].forEach(function (item) {
       var metric = element(document, 'div', 'cbu-metric');
       metric.dataset.metric = item[0];
       var label = element(document, 'div', 'cbu-label', item[1]);
+      var shortLabel = element(document, 'span', 'cbu-compact-label',
+        { secondary: '周', primary: '5h', cache: '缓存' }[item[0]]);
       var value = element(document, 'div', 'cbu-value', '—');
       var detail = element(document, 'div', 'cbu-detail', '当前来源未提供');
       var track = element(document, 'div', 'cbu-track');
       track.setAttribute('aria-hidden', 'true');
       var fill = element(document, 'span', 'cbu-fill');
       track.appendChild(fill);
-      metric.append(label, value, track, detail);
+      metric.append(label, shortLabel, value, track, detail);
       metrics.appendChild(metric);
       cells[item[0]] = { node: metric, value: value, detail: detail, fill: fill, label: item[1] };
     });
@@ -121,7 +125,7 @@
     var heading = element(document, 'div', 'cbu-panel-title', '账户配额');
     var list = element(document, 'dl', 'cbu-source-list');
     var fields = {};
-    [['source', '来源'], ['updated', '更新'], ['quota', '配额'], ['working', '运行']].forEach(function (item) {
+    [['source', '来源'], ['updated', '额度更新'], ['quota', '配额'], ['cache', '缓存'], ['working', '运行']].forEach(function (item) {
       var line = element(document, 'div', 'cbu-source-line');
       var term = element(document, 'dt', '', item[1]);
       var value = element(document, 'dd', '');
@@ -183,6 +187,20 @@
       return { available: true, value: window.usedPercent, reset: reset, stale: stale,
         detail: (stale ? '旧数据 · ' : '') + resetText(reset, now) };
     }
+    function readCache() {
+      var cache = snapshot.cache;
+      if (!cache || cache.status === 'unavailable') return { available: false, detail: '当前来源未提供' };
+      if (cache.status === 'waiting') return { available: false, detail: '等待本会话统计' };
+      if (cache.status === 'disconnected') return { available: false, detail: '数据连接已断开' };
+      if ((cache.status !== 'fresh' && cache.status !== 'stale') ||
+          !nonnegativeInteger(cache.inputTokens) || cache.inputTokens === 0 ||
+          !nonnegativeInteger(cache.cachedInputTokens) || cache.cachedInputTokens > cache.inputTokens) {
+        return { available: false, detail: '当前来源未提供' };
+      }
+      return { available: true, value: cache.cachedInputTokens / cache.inputTokens * 100,
+        stale: cache.status === 'stale', detail: cache.status === 'stale' ?
+          '上次统计 · 当前会话累计' : '当前会话累计' };
+    }
     function paintCell(key, state) {
       var cell = cells[key];
       cell.node.dataset.available = String(state.available);
@@ -202,9 +220,10 @@
       var now = Date.now();
       var weekly = readWindow('secondary', now);
       var primary = readWindow('primary', now);
+      var cache = readCache();
       paintCell('secondary', weekly);
       paintCell('primary', primary);
-      paintCell('cache', { available: false, detail: '当前来源未提供' });
+      paintCell('cache', cache);
       root.dataset.stale = String(snapshot.stale === true || weekly.stale === true || primary.stale === true);
       fields.source.textContent = textValue(snapshot.sourceLabel, '当前来源未提供');
       var date = typeof snapshot.updatedAt === 'string' && snapshot.updatedAt.trim() ? new Date(snapshot.updatedAt) : null;
@@ -212,6 +231,10 @@
         date.toLocaleString('zh-CN', { hour12: false }) : '更新时间未提供';
       fields.quota.textContent = statusLabel(snapshot.status) + '。每周：' + (weekly.available ? (weekly.stale ? '旧数据' : '可用') : weekly.detail) +
         '；5 小时：' + (primary.available ? (primary.stale ? '旧数据' : '可用') : primary.detail);
+      fields.cache.textContent = cache.detail + '。来源：Codex 当前会话统计；命中率 = 累计缓存输入 ÷ 累计输入。' +
+        (cache.available && snapshot.cache.observedAt ? '收到时间：' +
+          new Date(snapshot.cache.observedAt).toLocaleTimeString('zh-CN', { hour12: false }) + '。' :
+          '初次接入或切换会话后，等待新的真实统计。');
       fields.working.textContent = '运行状态未接通';
       var deadlines = [weekly, primary].filter(function (state) {
         return state.available && finiteNumber(state.reset) && state.reset * 1000 > now;
@@ -225,8 +248,14 @@
       // Copy only this renderer's contract; unrelated account or session fields never enter its DOM.
       var input = next && typeof next === 'object' ? next : {};
       var limits = input.limits && typeof input.limits === 'object' ? input.limits : {};
+      var cache = input.cache && typeof input.cache === 'object' ? input.cache : {};
       snapshot = { status: input.status, stale: input.stale, sourceLabel: input.sourceLabel,
-        updatedAt: input.updatedAt, limits: {} };
+        updatedAt: input.updatedAt, limits: {}, cache: {
+          status: CACHE_STATUSES.indexOf(cache.status) !== -1 ? cache.status : 'unavailable',
+          inputTokens: nonnegativeInteger(cache.inputTokens) ? cache.inputTokens : null,
+          cachedInputTokens: nonnegativeInteger(cache.cachedInputTokens) ? cache.cachedInputTokens : null,
+          observedAt: nonnegativeInteger(cache.observedAt) ? cache.observedAt : null
+        } };
       ['primary', 'secondary'].forEach(function (key) {
         var item = limits[key];
         snapshot.limits[key] = item && typeof item === 'object' ? {

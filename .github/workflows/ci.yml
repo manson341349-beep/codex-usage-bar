@@ -22,4 +22,4 @@ jobs:
           xcrun swiftc -O -framework AppKit -D LAUNCHER_TESTS platforms/macos/Launcher.swift -o "$RUNNER_TEMP/launcher-tests"
           "$RUNNER_TEMP/launcher-tests"
       - run: python3 platforms/macos/build.py
-      - run: python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.6.1-source.zip
+      - run: python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.7.0-source.zip
