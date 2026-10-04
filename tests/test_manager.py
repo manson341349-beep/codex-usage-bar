@@ -1,13 +1,15 @@
-"""Tests only our Python orchestration. Does not evaluate browser JavaScript."""
+"""Offline orchestration and isolated JS ownership fixtures; never connects to Codex."""
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch, MagicMock
 
-from codex_bar.manager import (ASSET_NAMES, ManagerError, Renderer, main,
+from codex_bar.manager import (ASSET_NAMES, ASSET_LIMITS, BRIDGE_KEY, ManagerError, Renderer, main,
                                read_assets, install_expression, run_foreground, run_daily, RendererCollection)
 from codex_bar.host import HostError
 from codex_bar.cdp import CDPError
@@ -29,13 +31,16 @@ class ManagerTests(unittest.TestCase):
         self.renderer = Renderer(self.session, SimpleNamespace(session_id='test'), token='owned-token')
 
     def test_building_bundle_only_concatenates_and_escapes_owned_test_strings(self):
-        assets = {'bar.js': '/* owned-test-one */', 'adaptive.js': '/* owned-test-two */',
+        assets = {'sprig.js': '/* owned-test-sprig */',
+                  'bar.js': '/* owned-test-one */', 'adaptive.js': '/* owned-test-two */',
                   'bar.css': '"\\\nCSS sentinel'}
         source = install_expression(assets, '"sentinel')
         self.assertIn(json.dumps(assets['bar.css']), source)
         self.assertIn('homeOnly:true', source)
         self.assertIn('existing-information-bar', source)
         self.assertNotIn('eval(', source)
+        self.assertLess(source.index(assets['sprig.js']), source.index(assets['bar.js']))
+        self.assertLess(source.index(assets['bar.js']), source.index(assets['adaptive.js']))
 
     def test_install_refusal_is_not_success(self):
         self.session.value = {'installed': False, 'reason': 'existing-information-bar'}
@@ -50,6 +55,7 @@ class ManagerTests(unittest.TestCase):
         self.assertIn("location.protocol!=='app:' || location.host!=='-'", source)
         self.assertIn('previous.token===token', source)
         self.assertIn('window.CodexUsageBar===previous.barExport', source)
+        self.assertIn('window.CodexUsageBarSprig===previous.sprigExport', source)
         self.assertIn('installed:true, reused:true', source)
 
     def test_snapshot_never_forwards_thread_content_or_work_claim(self):
@@ -181,6 +187,58 @@ class ManagerTests(unittest.TestCase):
                 with self.subTest(manifest=malformed), self.assertRaisesRegex(ManagerError, 'asset_manifest_mismatch'):
                     read_assets(root)
 
+    def test_asset_allowlist_requires_sprig_and_refuses_extra_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'web').mkdir()
+            for names in (set(ASSET_NAMES) - {'sprig.js'},
+                          set(ASSET_NAMES) | {'external.js'},
+                          set(ASSET_NAMES) | {'../external.js'}):
+                manifest = dict.fromkeys(names, '0' * 64)
+                (root / 'web/asset-manifest.json').write_text(json.dumps(manifest))
+                with self.subTest(names=names), self.assertRaisesRegex(ManagerError, 'asset_manifest_mismatch'):
+                    read_assets(root)
+
+    def test_only_sprig_has_a_two_mebibyte_limit_and_boundaries_are_enforced(self):
+        self.assertEqual(ASSET_LIMITS['sprig.js'], 2 * 1024 * 1024)
+        self.assertEqual({ASSET_LIMITS[n] for n in ASSET_NAMES if n != 'sprig.js'}, {262144})
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            web = root / 'web'
+            web.mkdir()
+            for name in ASSET_NAMES:
+                for size in (ASSET_LIMITS[name], ASSET_LIMITS[name] + 1):
+                    with self.subTest(asset=name, bytes=size):
+                        manifest = {}
+                        for asset in ASSET_NAMES:
+                            data = b' ' * size if asset == name else b'/* fixture */'
+                            (web / asset).write_bytes(data)
+                            manifest[asset] = hashlib.sha256(data).hexdigest()
+                        (web / 'asset-manifest.json').write_text(json.dumps(manifest))
+                        if size <= ASSET_LIMITS[name]:
+                            self.assertEqual(len(read_assets(root)[name]), size)
+                        else:
+                            with self.assertRaisesRegex(ManagerError, 'asset_fingerprint_mismatch'):
+                                read_assets(root)
+
+    def test_sprig_tampering_and_symlink_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            web = root / 'web'
+            web.mkdir()
+            data = b'/* original Sprig fixture */'
+            for name in ASSET_NAMES:
+                (web / name).write_bytes(data)
+            (web / 'asset-manifest.json').write_text(json.dumps(
+                dict.fromkeys(ASSET_NAMES, hashlib.sha256(data).hexdigest())))
+            (web / 'sprig.js').write_bytes(b'/* modified Sprig fixture */')
+            with self.assertRaisesRegex(ManagerError, 'asset_fingerprint_mismatch'):
+                read_assets(root)
+            (web / 'sprig.js').unlink()
+            (web / 'sprig.js').symlink_to(web / 'bar.js')
+            with self.assertRaisesRegex(ManagerError, 'unsafe_asset_path'):
+                read_assets(root)
+
     def test_frontend_rejection_runs_full_cleanup(self):
         host = MagicMock()
         host.__enter__.return_value = host
@@ -228,6 +286,103 @@ class ManagerTests(unittest.TestCase):
         renderer.dispose.assert_called_once()
         host.stop.assert_called_once()
         self.assertLess(clock[0],11.3)
+
+
+@unittest.skipUnless(shutil.which('node'), 'Node.js is required for isolated export ownership fixtures')
+class ExportOwnershipTests(unittest.TestCase):
+    def run_javascript(self, assertions, *, overrides=None):
+        assets = {
+            'sprig.js': 'order.push("sprig");window.CodexUsageBarSprig={mount(){}};',
+            'bar.js': 'if(!window.CodexUsageBarSprig)throw new Error("missing Sprig");'
+                      'order.push("bar");window.CodexUsageBar={mount(){}};',
+            'adaptive.js': 'order.push("adaptive");window.CodexUsageBarAdapter={'
+                           'install(){installs++;return {dispose(){disposals++}}}};',
+            'bar.css': '/* isolated ownership fixture */',
+        }
+        assets.update(overrides or {})
+        session = FakeSession()
+        session.value = {'owned': True, 'removed': True}
+        renderer = Renderer(session, SimpleNamespace(session_id='fixture'), token='owned-token')
+        renderer.installed = True
+        renderer.dispose()
+        dispose_source = session.calls[-1][1]['expression']
+        script = '''
+          const vm=require('node:vm'), assert=require('node:assert/strict');
+          const key=Symbol.for(KEY);
+          const context=()=>vm.createContext({window:{},location:{protocol:'app:',host:'-'},
+            document:{querySelector(){return null}},order:[],installs:0,disposals:0,
+            foreignSprig:{foreign:true},foreignBar:{foreign:true},
+            foreignAdapter:{foreign:true},foreignBridge:{foreign:true}});
+          const install=c=>vm.runInContext(INSTALL,c);
+          const dispose=c=>vm.runInContext(DISPOSE,c);
+        '''.replace('KEY', json.dumps(BRIDGE_KEY)).replace(
+            'INSTALL', json.dumps(install_expression(assets, 'owned-token', home_only=False))).replace(
+            'DISPOSE', json.dumps(dispose_source))
+        result = subprocess.run([shutil.which('node'), '-'], input=script + assertions,
+                                text=True, capture_output=True, timeout=15, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_owned_exports_install_in_order_and_reuse_without_reexecution(self):
+        self.run_javascript('''
+          const c=context();assert.equal(install(c).installed,true);
+          assert.equal(c.order.join(','),'sprig,bar,adaptive');
+          const own=c.window.CodexUsageBarSprig;
+          assert.equal(install(c).reused,true);assert.equal(c.installs,1);
+          assert.equal(c.window.CodexUsageBarSprig,own);
+          c.window.CodexUsageBarSprig=c.foreignSprig;
+          assert.equal(install(c).reason,'existing-information-bar');
+          assert.equal(c.window.CodexUsageBarSprig,c.foreignSprig);
+          assert.equal(c.installs,1);
+        ''')
+
+    def test_existing_sprig_property_is_never_overwritten_even_if_falsy(self):
+        self.run_javascript('''
+          for(const value of [{foreign:true},null,undefined,false]){
+            const c=context();c.window.CodexUsageBarSprig=value;
+            assert.equal(install(c).reason,'existing-information-bar');
+            assert.equal(c.window.CodexUsageBarSprig,value);
+            assert.equal(c.order.length,0);assert.equal(c.window[key],undefined);
+          }
+        ''')
+
+    def test_dispose_removes_all_owned_exports_and_no_foreign_replacements(self):
+        self.run_javascript('''
+          const c=context();install(c);assert.equal(dispose(c).removed,true);
+          assert.equal(c.disposals,1);assert.equal(c.window[key],undefined);
+          for(const name of ['CodexUsageBarSprig','CodexUsageBar','CodexUsageBarAdapter'])
+            assert.equal(name in c.window,false);
+          const d=context();install(d);
+          d.window.CodexUsageBarSprig=d.foreignSprig;
+          d.window.CodexUsageBar=d.foreignBar;d.window.CodexUsageBarAdapter=d.foreignAdapter;
+          assert.equal(dispose(d).removed,true);assert.equal(d.disposals,1);
+          assert.equal(d.window.CodexUsageBarSprig,d.foreignSprig);
+          assert.equal(d.window.CodexUsageBar,d.foreignBar);
+          assert.equal(d.window.CodexUsageBarAdapter,d.foreignAdapter);
+        ''')
+
+    def test_failed_mount_preserves_export_and_bridge_replacements(self):
+        self.run_javascript('''
+          const c=context();assert.equal(install(c).reason,'mount-failed');
+          assert.equal(c.window.CodexUsageBarSprig,c.foreignSprig);
+          assert.equal(c.window.CodexUsageBar,c.foreignBar);
+          assert.equal(c.window.CodexUsageBarAdapter,c.foreignAdapter);
+          assert.equal(c.window[key],c.foreignBridge);
+        ''', overrides={'adaptive.js': '''
+          window.CodexUsageBarAdapter={install(){
+            window.CodexUsageBarSprig=foreignSprig;window.CodexUsageBar=foreignBar;
+            window.CodexUsageBarAdapter=foreignAdapter;
+            window[Symbol.for("codex-usage-bar.bridge.v1")]=foreignBridge;
+            throw new Error('synthetic mount failure');
+          }};
+        '''})
+
+    def test_failure_loading_a_later_asset_cleans_earlier_owned_exports(self):
+        self.run_javascript('''
+          const c=context();assert.equal(install(c).reason,'mount-failed');
+          for(const name of ['CodexUsageBarSprig','CodexUsageBar','CodexUsageBarAdapter'])
+            assert.equal(name in c.window,false);
+          assert.equal(c.window[key],undefined);
+        ''', overrides={'bar.js': 'throw new Error("synthetic later asset failure");'})
 
 
 class RendererCollectionTests(unittest.TestCase):

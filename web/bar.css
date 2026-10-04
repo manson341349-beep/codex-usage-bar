@@ -90,6 +90,7 @@
   -webkit-tap-highlight-color: transparent;
 }
 .cbu-pet {
+  position: relative;
   display: block;
   width: 56px;
   height: 56px;
@@ -97,18 +98,11 @@
   touch-action: manipulation;
 }
 .cbu-pet svg { display: block; width: 56px; height: 56px; overflow: visible; }
+.cbu-pet canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; pointer-events: none; }
 .cbu-pet:focus-visible, .cbu-info:focus-visible, .cbu-toggle:focus-visible {
   outline: 2px solid var(--cbu-accent);
   outline-offset: 3px;
 }
-.cbu-robot { transform-box: view-box; transform-origin: 32px 55px; animation: cbu-breathe 4.8s ease-in-out infinite; }
-.cbu-eyes { transform-box: fill-box; transform-origin: center; animation: cbu-blink 6.6s infinite; }
-.cbu-arm { transform-box: view-box; transform-origin: 48px 32px; }
-.cbu-heart { opacity: 0; transform-box: view-box; transform-origin: 52px 11px; }
-.cbu-pet:hover .cbu-arm, .cbu-pet:focus-visible .cbu-arm { animation: cbu-wave 850ms ease-in-out infinite; }
-.cbu-pet:hover .cbu-heart, .cbu-pet:focus-visible .cbu-heart { opacity: 1; }
-.cbu-pet.is-nodding .cbu-robot { animation: cbu-nod 650ms ease-in-out both; }
-.cbu-pet.is-burst .cbu-heart { animation: cbu-heart 650ms ease-out both; }
 .cbu-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; }
 .cbu-metric { min-width: 0; padding: 0 9px; border-left: 1px solid var(--cbu-soft); }
 .cbu-metric:first-child { padding-left: 0; border-left: 0; }
@@ -149,12 +143,6 @@
 .cbu-source-line { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 9px; font-size: 11px; }
 .cbu-source-line dt { color: var(--cbu-muted); }
 .cbu-source-line dd { margin: 0; overflow-wrap: anywhere; line-height: 1.55; }
-@keyframes cbu-breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-1.2px); } }
-@keyframes cbu-blink { 0%, 42%, 45%, 100% { transform: scaleY(1); } 43%, 44% { transform: scaleY(.1); } }
-@keyframes cbu-wave { 0%, 100% { transform: rotate(0); } 25%, 65% { transform: rotate(19deg); } 45%, 85% { transform: rotate(-10deg); } }
-@keyframes cbu-nod { 0%, 100% { transform: translateY(0) rotate(0); } 28% { transform: translateY(2px) rotate(5deg); } 55% { transform: translateY(-1px) rotate(-3deg); } 78% { transform: translateY(1px) rotate(2deg); } }
-@keyframes cbu-heart { 0% { opacity: 0; transform: translateY(3px) scale(.5); } 35% { opacity: 1; transform: translateY(-1px) scale(1.15); } 75% { opacity: 1; transform: translateY(-5px) scale(1); } 100% { opacity: 0; transform: translateY(-8px) scale(.9); } }
 @media (prefers-reduced-motion: reduce) {
   .cbu-bar *, .cbu-bar *::before, .cbu-bar *::after { animation: none !important; transition: none !important; }
-  .cbu-pet.is-burst .cbu-heart { opacity: 1; }
 }

@@ -26,7 +26,8 @@ MARKER = {'schemaVersion': 1, 'product': PRODUCT, 'bundleIdentifier': BUNDLE_ID}
 PAYLOAD_FILES = (
     'codex_bar/__init__.py', 'codex_bar/__main__.py', 'codex_bar/manager.py',
     'codex_bar/host.py', 'codex_bar/daily_host.py', 'codex_bar/cdp.py', 'codex_bar/quota.py',
-    'web/bar.js', 'web/bar.css', 'web/adaptive.js', 'web/asset-manifest.json',
+    'web/bar.js', 'web/bar.css', 'web/adaptive.js', 'web/sprig.js',
+    'web/THREE-LICENSE.txt', 'web/asset-manifest.json',
     'platforms/macos/Launcher.swift', 'platforms/macos/Start.command',
     'platforms/macos/Test.command', 'platforms/macos/install.py',
     'platforms/macos/build.py', 'README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
@@ -38,6 +39,10 @@ SOURCE_EXTRA_FILES = (
     'tests/test_manager.py', 'tests/test_quota.py',
     'tests/test_frontend.js',
     'platforms/windows/README.md', '.github/workflows/ci.yml', 'scripts/validate.py',
+    'web/sprig-source/runtime.js', 'web/sprig-source/character.js',
+    'web/sprig-source/motion.js', 'web/vendor/three.module.js',
+    'web/vendor/three.core.min.js', 'scripts/build-sprig.mjs',
+    'package.json', 'package-lock.json',
 )
 OPTIONAL_SOURCE_FILES = (
     'tests/test_assets.py',

@@ -14,22 +14,8 @@
     identity_unknown: '账户身份未确认', account_changed: '账户已切换，等待新数据',
     api_key_unsupported: '当前账户来源不支持配额'
   };
-  var robot = '<svg viewBox="0 0 64 64" fill="none" aria-hidden="true" focusable="false">' +
-    '<ellipse cx="32" cy="58" rx="17" ry="3" fill="currentColor" opacity=".08"/>' +
-    '<g class="cbu-robot">' +
-    '<path d="M29 15V10c0-2 1-3 3-3" stroke="var(--cbu-outline)" stroke-width="2.5" stroke-linecap="round"/>' +
-    '<circle cx="34" cy="7" r="3.3" fill="var(--cbu-mint)" stroke="var(--cbu-outline)" stroke-width="1.8"/>' +
-    '<path d="M21 48v5c0 2-2 3-4 3h-2" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path d="M42 48v5c0 2 2 3 4 3h2" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path d="M16 31c-5 0-7 4-6 8l1 3" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path class="cbu-arm" d="M48 32c5 0 7-4 6-8l-1-3" stroke="var(--cbu-outline)" stroke-width="4" stroke-linecap="round"/>' +
-    '<path d="M32 14c-11 0-18 7-18 18v8c0 10 7 15 18 15s18-5 18-15v-8c0-11-7-18-18-18Z" fill="var(--cbu-mint)" stroke="var(--cbu-outline)" stroke-width="2"/>' +
-    '<path d="M19 24c2-4 6-6 11-6" stroke="var(--cbu-highlight)" stroke-width="2.2" stroke-linecap="round"/>' +
-    '<path d="M32 23c-9 0-13 3-13 10v3c0 6 5 9 13 9s13-3 13-9v-3c0-7-4-10-13-10Z" fill="var(--cbu-ink)"/>' +
-    '<g class="cbu-eyes" stroke="var(--cbu-eye)" stroke-width="3" stroke-linecap="round"><path d="M26 32v4"/><path d="M38 32v4"/></g>' +
-    '<path d="M29 40c2 1.4 4 1.4 6 0" stroke="var(--cbu-eye)" stroke-width="1.3" stroke-linecap="round"/>' +
-    '<path d="M28 49h8" stroke="var(--cbu-outline)" stroke-opacity=".22" stroke-width="2" stroke-linecap="round"/>' +
-    '</g><path class="cbu-heart" d="M52 15c-7-4-7-8-4-9 2-1 4 0 4 2 1-2 3-3 5-2 3 2 1 6-5 9Z" fill="var(--cbu-heart-color)"/></svg>';
+  // Original front-facing Sprig artwork remains visible without WebGL.
+  var sprigFallback = '<svg class="cbu-sprig-fallback" aria-hidden="true" focusable="false" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><ellipse cx="50" cy="91" rx="24" ry="4" fill="#abc6b8" opacity=".4"/><path d="M32 37 Q17 7 30 5 Q43 7 43 32 M61 33 Q65 12 75 17 Q87 25 69 43" fill="#8abda4" stroke="#729e88" stroke-width="1"/><ellipse cx="50" cy="72" rx="21" ry="21" fill="#8abda4"/><ellipse cx="50" cy="72" rx="13" ry="16" fill="#ffebc9"/><ellipse cx="34" cy="88" rx="11" ry="6" fill="#8abda4"/><ellipse cx="66" cy="88" rx="11" ry="6" fill="#8abda4"/><rect x="17" y="28" width="66" height="50" rx="23" fill="#8abda4"/><rect x="23" y="39" width="54" height="33" rx="15" fill="#ffebc9"/><g fill="#223c32"><rect x="34" y="48" width="8" height="12" rx="4"/><rect x="58" y="48" width="8" height="12" rx="4"/></g><g fill="#fff"><circle cx="37" cy="51" r="1.6"/><circle cx="61" cy="51" r="1.6"/></g><path d="M46 64 Q50 68 54 64" fill="none" stroke="#223c32" stroke-width="1.6" stroke-linecap="round"/><g fill="#eab095"><ellipse cx="29" cy="62" rx="4" ry="2"/><ellipse cx="71" cy="62" rx="4" ry="2"/></g><circle cx="71" cy="25" r="3" fill="#eac376"/></svg>';
 
   function element(document, tag, className, text) {
     var node = document.createElement(tag);
@@ -68,7 +54,9 @@
     var disposed = false;
     var cleanups = [];
     var deadlineTimer = null;
-    var nodTimer = null;
+    var companion = null;
+    var companionVisible = null;
+    var hostVisible = options.visible !== false;
     var blurTimer = null;
     var snapshot = {};
     var compact = false;
@@ -81,9 +69,9 @@
     var row = element(document, 'div', 'cbu-row');
     var pet = element(document, 'button', 'cbu-pet');
     pet.type = 'button';
-    pet.setAttribute('aria-label', '和 Milo 打个招呼');
-    pet.title = '你好，我是 Milo';
-    pet.innerHTML = robot;
+    pet.setAttribute('aria-label', '和 Sprig 芽团打个招呼');
+    pet.title = '你好，我是 Sprig 芽团';
+    pet.innerHTML = sprigFallback;
     var metrics = element(document, 'div', 'cbu-metrics');
     var cells = {};
     [['secondary', '每周订阅剩余'], ['primary', '5 小时已用'], ['cache', '缓存命中']].forEach(function (item) {
@@ -269,34 +257,71 @@
       if (disposed) return;
       theme = next === 'light' || next === 'dark' ? next : 'auto';
       root.dataset.theme = theme;
+      companionCall('setTheme', theme);
+    }
+    function releaseCompanion() {
+      var previous = companion;
+      companion = null;
+      companionVisible = null;
+      try { if (previous && typeof previous.destroy === 'function') previous.destroy(); }
+      catch (_) { /* Renderer failures cannot disable real quota or cache data. */ }
+    }
+    function companionCall(method, value) {
+      if (!companion) return null;
+      try { return companion[method](value); }
+      catch (_) {
+        releaseCompanion();
+        pet.innerHTML = sprigFallback;
+        return null;
+      }
+    }
+    function syncCompanionVisibility() {
+      var visible = hostVisible && !compact;
+      if (!companion || companionVisible === visible) return;
+      companionVisible = visible;
+      companionCall('setVisible', visible);
+    }
+    function setVisible(next) {
+      if (disposed) return;
+      hostVisible = next === true;
+      syncCompanionVisibility();
+    }
+    function inspectCompanion() {
+      if (disposed || !companion) return null;
+      var source = companionCall('inspect');
+      if (!source || typeof source !== 'object') return null;
+      // Only this renderer's known diagnostics can leave the component.
+      var result = {};
+      ['visible', 'paused', 'reducedMotion', 'running', 'disposed', 'contextLost',
+        'pointerListening', 'gpuTimerSupported'].forEach(function (key) {
+        if (typeof source[key] === 'boolean') result[key] = source[key];
+      });
+      ['frames', 'drawCalls', 'triangles', 'width', 'height', 'pixelRatio', 'initCount',
+        'rafMedianMs', 'rafP95Ms', 'cpuP95Ms', 'gpuP95Ms', 'rafSamples', 'gpuSamples'].forEach(function (key) {
+        if (source[key] === null || (finiteNumber(source[key]) && source[key] >= 0)) result[key] = source[key];
+      });
+      if (['webgl', 'fallback'].indexOf(source.mode) !== -1) result.mode = source.mode;
+      if (['idle', 'hello', 'play', 'work', 'done'].indexOf(source.state) !== -1) result.state = source.state;
+      return result;
     }
     function destroy() {
       if (disposed) return;
       disposed = true;
-      [deadlineTimer, nodTimer, blurTimer].forEach(function (timer) {
+      [deadlineTimer, blurTimer].forEach(function (timer) {
         if (timer !== null) view.clearTimeout(timer);
       });
+      releaseCompanion();
       cleanups.reverse().forEach(function (cleanup) { cleanup(); });
       cleanups.length = 0;
       root.remove();
       snapshot = {};
     }
     try {
-      listen(pet, 'click', function () {
-        if (nodTimer !== null) view.clearTimeout(nodTimer);
-        pet.classList.remove('is-nodding', 'is-burst');
-        // Restart only this finite greeting animation; no background animation timer is needed.
-        void pet.getBoundingClientRect();
-        pet.classList.add('is-nodding', 'is-burst');
-        nodTimer = view.setTimeout(function () {
-          if (!disposed) pet.classList.remove('is-nodding', 'is-burst');
-          nodTimer = null;
-        }, 650);
-      });
       listen(toggle, 'click', function () {
         setOpen(false);
         compact = !compact;
         root.dataset.mode = compact ? 'compact' : 'expanded';
+        syncCompanionVisibility();
         toggle.setAttribute('aria-label', compact ? '展开用量条' : '收起用量条');
         toggle.setAttribute('aria-expanded', String(!compact));
         toggle.title = compact ? '展开额度条' : '折叠额度条';
@@ -320,11 +345,26 @@
       setTheme(options.theme);
       render();
       container.appendChild(root);
+      // Enhancement is optional; the small static Sprig and all data work alone.
+      if (global.CodexUsageBarSprig && typeof global.CodexUsageBarSprig.mount === 'function') {
+        try {
+          companion = global.CodexUsageBarSprig.mount(pet, { root: root });
+          if (!companion || ['setVisible', 'setTheme', 'destroy', 'inspect'].some(function (method) {
+            return typeof companion[method] !== 'function';
+          })) throw new Error('invalid-sprig-renderer');
+          companionCall('setTheme', theme);
+          syncCompanionVisibility();
+        } catch (_) {
+          releaseCompanion();
+          pet.innerHTML = sprigFallback;
+        }
+      }
     } catch (error) {
       destroy();
       throw error;
     }
     return { update: update, element: root, destroy: destroy, setTheme: setTheme,
+      setVisible: setVisible, inspectCompanion: inspectCompanion,
       closeInfo: function () { var wasOpen = open; setOpen(false); return wasOpen; } };
   }
 

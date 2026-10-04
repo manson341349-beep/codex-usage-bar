@@ -22,7 +22,9 @@ from .daily_host import DailyHost
 from .quota import CodexQuotaClient, QuotaBridge
 
 BRIDGE_KEY = 'codex-usage-bar.bridge.v1'
-ASSET_NAMES = ('bar.js', 'adaptive.js', 'bar.css')
+ASSET_NAMES = ('sprig.js', 'bar.js', 'adaptive.js', 'bar.css')
+ASSET_LIMITS = {name: 2 * 1024 * 1024 if name == 'sprig.js' else 262144
+                for name in ASSET_NAMES}
 
 
 class ManagerError(RuntimeError):
@@ -45,7 +47,7 @@ def read_assets(root: Path = PROJECT_ROOT) -> dict[str, str]:
             if path.is_symlink() or not path.is_file():
                 raise ManagerError('unsafe_asset_path')
             data = path.read_bytes()
-            if len(data) > 262144 or hashlib.sha256(data).hexdigest() != manifest[name]:
+            if len(data) > ASSET_LIMITS[name] or hashlib.sha256(data).hexdigest() != manifest[name]:
                 raise ManagerError('asset_fingerprint_mismatch')
             output[name] = data.decode('utf-8')
         return output
@@ -61,27 +63,35 @@ def install_expression(assets: dict[str, str], token: str, *, home_only=True) ->
         return {installed:false, reason:'application-origin-required'};
       const previous=window[key];
       if(previous && previous.token===token && previous.api &&
+         previous.sprigExport && window.CodexUsageBarSprig===previous.sprigExport &&
          window.CodexUsageBar===previous.barExport &&
          window.CodexUsageBarAdapter===previous.adaptiveExport)
         return {installed:true, reused:true};
-      if(window[key] || window.CodexUsageBar || window.CodexUsageBarAdapter)
+      if(window[key] || 'CodexUsageBarSprig' in window ||
+         'CodexUsageBar' in window || 'CodexUsageBarAdapter' in window)
         return {installed:false, reason:'existing-information-bar'};
-      const owned={token, api:null, barExport:null, adaptiveExport:null}; window[key]=owned;
+      const owned={token, api:null, sprigExport:null, barExport:null, adaptiveExport:null}; window[key]=owned;
       try {
         %s
+        owned.sprigExport=window.CodexUsageBarSprig;
         %s
         owned.barExport=window.CodexUsageBar;
+        %s
         owned.adaptiveExport=window.CodexUsageBarAdapter;
+        if(!owned.sprigExport) throw new Error('sprig-export-missing');
         owned.api=window.CodexUsageBarAdapter.install({css:%s, homeOnly:%s});
         return {installed:true};
       } catch (_) {
         if (owned.api) { try { owned.api.dispose(); } catch (_) {} }
         if(window[key]===owned) delete window[key];
-        delete window.CodexUsageBar; delete window.CodexUsageBarAdapter;
+        if(owned.sprigExport && window.CodexUsageBarSprig===owned.sprigExport) delete window.CodexUsageBarSprig;
+        if(owned.barExport && window.CodexUsageBar===owned.barExport) delete window.CodexUsageBar;
+        if(owned.adaptiveExport && window.CodexUsageBarAdapter===owned.adaptiveExport) delete window.CodexUsageBarAdapter;
         return {installed:false, reason:'mount-failed'};
       }
-    })()""" % (json.dumps(BRIDGE_KEY), json.dumps(token), assets['bar.js'],
-                assets['adaptive.js'], json.dumps(assets['bar.css']), json.dumps(home_only))
+    })()""" % (json.dumps(BRIDGE_KEY), json.dumps(token), assets['sprig.js'],
+                assets['bar.js'], assets['adaptive.js'], json.dumps(assets['bar.css']),
+                json.dumps(home_only))
 
 
 def owned_expression(token: str, body: str) -> str:
@@ -150,6 +160,7 @@ class Renderer:
           h.api.dispose();
           const absent=!document.querySelector('[data-codex-usage-bar]');
           if(window[Symbol.for(%s)]===h) delete window[Symbol.for(%s)];
+          if(window.CodexUsageBarSprig===h.sprigExport) delete window.CodexUsageBarSprig;
           if(window.CodexUsageBar===h.barExport) delete window.CodexUsageBar;
           if(window.CodexUsageBarAdapter===h.adaptiveExport) delete window.CodexUsageBarAdapter;
           return {owned:true,removed:absent};

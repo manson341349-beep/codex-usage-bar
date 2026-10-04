@@ -109,6 +109,24 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('codex_bar/daily_host.py', build.PAYLOAD_FILES)
         self.assertIn('tests/test_daily_host.py', build.SOURCE_EXTRA_FILES)
 
+    def test_sprig_bundle_and_license_ship_but_build_inputs_are_source_only(self):
+        runtime = {'web/sprig.js', 'web/THREE-LICENSE.txt'}
+        build_inputs = {'web/sprig-source/runtime.js', 'web/sprig-source/character.js',
+                        'web/sprig-source/motion.js', 'web/vendor/three.module.js',
+                        'web/vendor/three.core.min.js', 'scripts/build-sprig.mjs',
+                        'package.json', 'package-lock.json'}
+        self.assertTrue(runtime.issubset(build.PAYLOAD_FILES))
+        self.assertTrue(build_inputs.issubset(build.SOURCE_EXTRA_FILES))
+        self.assertFalse(build_inputs.intersection(build.PAYLOAD_FILES))
+        app = self.root / 'sprig.app'
+        build.build_app(app, _source_root=self.source)
+        payload = app / 'Contents/Resources/codex-usage-bar'
+        for name in runtime:
+            self.assertEqual((payload / name).read_bytes(), (self.source / name).read_bytes())
+        for name in build_inputs:
+            self.assertFalse((payload / name).exists(), name)
+        install.verify_owned_app(app)
+
     def test_swift_compiler_uses_copied_source_and_no_shell(self):
         payload = self.root / 'copy with spaces'
         destination = self.root / 'output with spaces/launcher'
@@ -272,7 +290,8 @@ class PackagingTests(unittest.TestCase):
 
     def test_license_and_provenance_are_required(self):
         for relative in ('README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
-                         'web/asset-manifest.json', 'platforms/macos/Launcher.swift'):
+                         'web/asset-manifest.json', 'web/THREE-LICENSE.txt',
+                         'platforms/macos/Launcher.swift'):
             path = self.source / relative
             data = path.read_bytes()
             path.unlink()

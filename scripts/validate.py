@@ -22,7 +22,8 @@ def main():
             ast.parse(path.read_text(), filename=str(path.relative_to(ROOT)))
             files.append(path)
     for name in ('LICENSE', 'README.md', 'NOTICE.md', 'docs/PROVENANCE.md',
-                 'platforms/windows/README.md', 'platforms/macos/Launcher.swift'):
+                 'platforms/windows/README.md', 'platforms/macos/Launcher.swift',
+                 'web/THREE-LICENSE.txt'):
         assert (ROOT / name).is_file(), name
     swift_source = ROOT / 'platforms/macos/Launcher.swift'
     assert swift_source.read_text(encoding='utf-8').strip(), 'empty native launcher source'

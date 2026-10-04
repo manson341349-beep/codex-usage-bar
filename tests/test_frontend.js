@@ -51,6 +51,11 @@ function environment({ renderer = true, adapter = true } = {}) {
     set innerHTML(value) { this._html = value; this.childNodes = []; }
     append(...nodes) { for (const node of nodes) this.appendChild(node); }
     appendChild(node) { node.remove?.(); this.childNodes.push(node); node.parentElement = this; return node; }
+    insertBefore(node, reference) {
+      const index = this.childNodes.indexOf(reference);
+      if (index < 0) throw new Error('reference is not a child');
+      node.remove?.(); this.childNodes.splice(index, 0, node); node.parentElement = this; return node;
+    }
     remove() {
       if (this.parentElement) this.parentElement.childNodes = this.parentElement.childNodes.filter(node => node !== this);
       this.parentElement = null;
@@ -223,6 +228,39 @@ function alignmentFixture(overrides = {}) {
   } };
 }
 
+function roomFixture({ unsafe = false } = {}) {
+  const env = environment();
+  env.composer.removeAttribute('data-composer-placement'); env.portal.remove();
+  env.composer.style.display = 'block'; env.composer.style.position = 'relative';
+  const decoration = env.document.createElement('div');
+  decoration.style.position = 'absolute'; decoration.style.pointerEvents = 'none';
+  const shell = env.document.createElement('div'); shell.style.position = 'relative';
+  shell.append(env.editor); env.composer.append(decoration, shell);
+  const geometry = { unsafe, bottom: 600, fixedHeight: false };
+  const proto = Object.getPrototypeOf(shell), original = proto.getBoundingClientRect;
+  const box = (x,y,w,h) => ({x,y,left:x,top:y,right:x+w,bottom:y+h,width:w,height:h});
+  const slot = () => env.composer.querySelector('[data-codex-usage-bar-slot]');
+  proto.getBoundingClientRect = function () {
+    if (this.style.display === 'none') return box(0,0,0,0);
+    const host = env.mounted(), inserted = !!slot(), bar = host?.shadowRoot?.querySelector('.cbu-bar');
+    const compact = bar?.dataset.mode === 'compact', height = compact ? 44 : 90;
+    const reservation = inserted ? height + 10 : 0, base = geometry.bottom - 44;
+    if (this === env.composer) return box(100,base - (geometry.fixedHeight ? 0 : reservation),1000,44 + (geometry.fixedHeight ? 0 : reservation));
+    if (this === shell) return box(216,base,768,44);
+    if (this === env.editor) return box(272,base+4,650,36);
+    if (this === decoration) return box(100,base+22,1000,22);
+    if (this === slot()) return box(100,base-reservation,1000,reservation);
+    if (this.hasAttribute('data-codex-usage-bar') || this.classList.contains('cbu-bar')) {
+      const h = this.classList.contains('cbu-bar') ? this.getRootNode().host : this;
+      const width = h.style.width && h.style.width !== '100%' ? parseFloat(h.style.width) : 1000;
+      const left = 100 + parseFloat(h.style.left || '0');
+      return box(left,base-reservation + (geometry.unsafe ? 70 : 0),width,height);
+    }
+    return original.call(this);
+  };
+  return {env, shell, decoration, geometry, slot};
+}
+
 function snapshot(env, overrides = {}) {
   return Object.assign({ status: 'fresh', stale: false, sourceLabel: 'Offline fixture', updatedAt: new Date(env.now()).toISOString(),
     limits: { primary: { usedPercent: 12, windowMinutes: 300, resetsAt: env.now() / 1000 + 3600, status: 'fresh' },
@@ -235,6 +273,24 @@ function mountBar(env) {
   const shadow = host.attachShadow({ mode: 'open' });
   const container = env.document.createElement('div'); shadow.append(container);
   return env.window.CodexUsageBar.mount(container, { theme: 'light', accountOnly: true });
+}
+
+function sprigStub(env) {
+  const instances = [];
+  env.window.CodexUsageBarSprig = { mount(pet, { root }) {
+    assert.equal(root.isConnected, true, 'mount happens after the bar enters its container');
+    assert.equal(root.contains(pet), true);
+    const instance = { pet, root, visible: false, calls: [], themes: [], destroys: 0,
+      setVisible(value) { this.visible = value; this.calls.push(value); },
+      setTheme(value) { this.themes.push(value); },
+      destroy() { this.destroys++; this.connectedAtDestroy = root.isConnected; },
+      inspect() { return { mode: 'webgl', state: 'idle', visible: this.visible,
+        paused: !this.visible, frames: 12, initCount: 1, gpuP95Ms: null }; }
+    };
+    instances.push(instance);
+    return instance;
+  } };
+  return instances;
 }
 
 const CACHE_THREAD = '11111111-2222-4333-8444-555555555555';
@@ -404,15 +460,93 @@ test('collapse closes details, updates disclosure labels, and preserves state ac
   assert.equal(toggle.getAttribute('aria-label'), '收起用量条'); bar.destroy();
 });
 
-test('renderer disposal removes document listeners and pending focus and greeting timers', () => {
+test('static Sprig works without a WebGL runtime and disposal clears focus resources', () => {
   const env = environment({ adapter: false }), bar = mountBar(env), root = bar.element;
   assert.equal(env.document.listenerCount(), 1);
-  const pet = root.querySelector('.cbu-pet'); pet.dispatchEvent({ type: 'click' }); assert.equal(pet.classList.contains('is-nodding'), true);
-  env.tick(650); assert.equal(pet.classList.contains('is-nodding'), false);
+  const pet = root.querySelector('.cbu-pet');
+  assert.match(pet.getAttribute('aria-label'), /Sprig 芽团/);
+  assert.match(pet.innerHTML, /cbu-sprig-fallback/);
+  assert.doesNotMatch(pet.innerHTML, /cbu-robot|Milo/);
+  assert.equal(bar.inspectCompanion(), null);
   pet.dispatchEvent({ type: 'click' }); root.dispatchEvent({ type: 'focusout' });
-  assert.equal(env.timers.size, 2); bar.destroy(); bar.destroy();
+  assert.equal(env.timers.size, 1); bar.destroy(); bar.destroy();
   assert.equal(env.timers.size, 0); assert.equal(pet.listenerCount(), 0); assert.equal(root.listenerCount(), 0);
   assert.equal(env.document.listenerCount(), 0);
+});
+
+test('Sprig visibility combines fold and host state, reuses its instance and follows theme', () => {
+  const env = environment({ adapter: false }), instances = sprigStub(env);
+  const bar = mountBar(env), root = bar.element, toggle = root.querySelector('.cbu-toggle');
+  const pet = instances[0];
+  assert.deepEqual(pet.calls, [true]); assert.deepEqual(pet.themes, ['light']);
+  toggle.dispatchEvent({ type: 'click' }); assert.equal(pet.visible, false);
+  bar.update(snapshot(env)); bar.setVisible(true); assert.equal(pet.visible, false);
+  toggle.dispatchEvent({ type: 'click' }); assert.equal(pet.visible, true);
+  bar.setVisible(false); toggle.dispatchEvent({ type: 'click' }); toggle.dispatchEvent({ type: 'click' });
+  assert.equal(pet.visible, false, 'expanding never overrides a hidden host');
+  bar.setVisible(true); assert.equal(pet.visible, true);
+  bar.setTheme('dark'); bar.setTheme('unsupported');
+  assert.deepEqual(pet.themes, ['light', 'dark', 'auto']);
+  assert.equal(instances.length, 1); assert.equal(bar.inspectCompanion().initCount, 1);
+  assert.match(root.textContent, /运行状态未接通/);
+  bar.destroy(); bar.destroy();
+  assert.equal(pet.destroys, 1); assert.equal(pet.connectedAtDestroy, true);
+  assert.equal(bar.inspectCompanion(), null);
+  assert.equal(env.document.listenerCount(), 0);
+});
+
+test('optional Sprig failures fall back without affecting real quota rendering', () => {
+  for (const failure of ['mount', 'theme', 'visibility', 'inspect', 'destroy']) {
+    const env = environment({ adapter: false });
+    const instances = sprigStub(env);
+    if (failure === 'mount') env.window.CodexUsageBarSprig.mount = () => { throw new Error('WebGL unavailable'); };
+    const bar = mountBar(env);
+    if (failure !== 'mount') {
+      const pet = instances[0];
+      pet[{ theme: 'setTheme', visibility: 'setVisible', inspect: 'inspect', destroy: 'destroy' }[failure]] = () => { throw new Error('renderer failed'); };
+      if (failure === 'theme') bar.setTheme('dark');
+      if (failure === 'visibility') bar.setVisible(false);
+      if (failure === 'inspect') assert.equal(bar.inspectCompanion(), null);
+    }
+    bar.update(snapshot(env));
+    assert.equal(label(bar.element, 'secondary'), '55%');
+    assert.equal(label(bar.element, 'primary'), '12%');
+    assert.match(bar.element.querySelector('.cbu-pet').innerHTML, /cbu-sprig-fallback/);
+    bar.destroy(); assert.equal(env.document.listenerCount(), 0);
+  }
+});
+
+test('companion inspection copies only fixed diagnostic keys and never private or DOM data', () => {
+  const env = environment({ adapter: false }), instances = sprigStub(env), bar = mountBar(env);
+  let forbiddenReads = 0;
+  const diagnostics = { mode: 'webgl', state: 'idle', frames: 5, visible: true,
+    gpuP95Ms: null, rafP95Ms: Infinity, width: -1, height: '56' };
+  for (const key of ['node', 'threadId', 'hostId', 'body', 'inputTokens']) {
+    Object.defineProperty(diagnostics, key, { get() { forbiddenReads++; throw new Error('private data'); } });
+  }
+  instances[0].inspect = () => diagnostics;
+  const first = bar.inspectCompanion(); diagnostics.frames = 6;
+  assert.equal(first.frames, 5); assert.equal(forbiddenReads, 0);
+  assert.deepEqual(Object.keys(first).sort(), ['frames', 'gpuP95Ms', 'mode', 'state', 'visible']);
+  bar.destroy();
+});
+
+test('adapter passes geometry and document visibility to Sprig and destroys before unmount', () => {
+  const env = environment(), instances = sprigStub(env), api = env.install(false);
+  const pet = instances[0], host = env.mounted();
+  assert.deepEqual(pet.calls, [false, true]);
+  assert.equal(api.inspect().companion.mode, 'webgl');
+  env.document.hidden = true; env.document.dispatchEvent({ type: 'visibilitychange' }); env.flush();
+  assert.equal(pet.visible, false);
+  env.document.hidden = false; env.document.dispatchEvent({ type: 'visibilitychange' }); env.flush();
+  assert.equal(pet.visible, true);
+  env.editor.box = { x: 100, y: 230, left: 100, top: 230, right: 700, bottom: 330, width: 600, height: 100 };
+  api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().status, 'hidden');
+  assert.equal(pet.visible, false); assert.equal(api.inspect().companion.paused, true);
+  delete env.editor.box; api.setAccountSnapshot(snapshot(env));
+  assert.equal(pet.visible, true); assert.equal(env.mounted(), host); assert.equal(instances.length, 1);
+  api.dispose(); assert.equal(pet.visible, false); assert.equal(pet.destroys, 1);
+  assert.equal(pet.connectedAtDestroy, true); assert.equal(api.inspect().companion, null);
 });
 
 test('adapter mounts exactly one empty home composer and rejects unsupported routes or turns', () => {
@@ -484,6 +618,162 @@ test('persistent mode accepts canonical routes without conversation text or opti
     assert.doesNotMatch(JSON.stringify(api.inspect()), /PRIVATE|fixture/);
   }
   api.dispose();
+});
+
+test('daily composers with absent placement infer only a confirmed portal UUID or empty home association', () => {
+  for (const association of [null, '', CACHE_THREAD, CACHE_THREAD.toUpperCase()]) {
+    const env = environment(); env.composer.removeAttribute('data-composer-placement');
+    if (association !== null) env.portal.setAttribute('data-above-composer-conversation-id', association);
+    cacheSidebarRow(env);
+    let privateReads = 0;
+    for (const name of ['textContent', 'innerHTML', 'innerText']) {
+      Object.defineProperty(env.editor, name, { get() { privateReads++; throw new Error('private editor content'); } });
+    }
+    const turn = env.document.createElement('article'); turn.setAttribute('data-turn-key', 'unread-fixture');
+    Object.defineProperty(turn, 'textContent', { get() { privateReads++; throw new Error('private turn content'); } });
+    env.document.body.append(turn);
+    const api = env.install(false); api.setAccountSnapshot(snapshot(env));
+    assert.equal(api.inspect().status, 'mounted');
+    assert.equal(env.mounted().parentElement, env.portal);
+    env.window.dispatchEvent(tokenUsageEvent(800, 300));
+    const bar = env.mounted().shadowRoot.querySelector('.cbu-bar');
+    assert.equal(label(bar, 'cache'), association ? '37.5%' : '—');
+    assert.equal(api.inspect().cacheStatus, association ? 'fresh' : 'unavailable');
+    assert.equal(privateReads, 0); api.dispose();
+  }
+});
+
+test('missing placement never accepts malformed associations, explicit unknown placement or home-only mode', () => {
+  for (const association of [' ', 'not-a-uuid', 'chatgpt:' + CACHE_THREAD, CACHE_THREAD + '\n', CACHE_THREAD + ' ']) {
+    const env = environment(); env.composer.removeAttribute('data-composer-placement');
+    env.portal.setAttribute('data-above-composer-conversation-id', association);
+    const api = env.install(false);
+    assert.equal(env.mounted(), null); assert.equal(api.inspect().reason, 'unsupported-composer');
+    assert.equal(api.inspect().cacheStatus, 'unavailable'); api.dispose();
+  }
+  for (const placement of ['', 'unknown', 'THREAD', 'null', ' home ']) {
+    const env = environment(); env.composer.setAttribute('data-composer-placement', placement);
+    env.portal.setAttribute('data-above-composer-conversation-id', CACHE_THREAD);
+    const api = env.install(false);
+    assert.equal(env.mounted(), null); assert.equal(api.inspect().reason, 'unsupported-composer'); api.dispose();
+  }
+  for (const association of [null, '', CACHE_THREAD]) {
+    const env = environment(); env.composer.removeAttribute('data-composer-placement');
+    if (association !== null) env.portal.setAttribute('data-above-composer-conversation-id', association);
+    const api = env.install(true);
+    assert.equal(env.mounted(), null); assert.equal(api.inspect().reason, 'unsupported-composer'); api.dispose();
+  }
+});
+
+test('missing placement still requires unique roots and direct portals, safe flow and one visible input', () => {
+  const cases = [
+    ['ambiguous-composer', env => { const root = env.document.createElement('div'); root.setAttribute('data-codex-composer-root', ''); env.document.body.append(root); }],
+    ['ambiguous-portal', env => { const portal = env.document.createElement('div'); portal.setAttribute('data-above-composer-portal', ''); env.composer.append(portal); }],
+    ['ambiguous-portal', env => { const wrapper = env.document.createElement('div'); wrapper.append(env.portal); env.composer.append(wrapper); }],
+    ['unsupported-portal-flow', env => { env.portal.style.position = 'absolute'; }],
+    ['ambiguous-editor', env => { const editor = env.document.createElement('div'); editor.className = 'ProseMirror'; editor.setAttribute('contenteditable', 'true'); env.composer.append(editor); }],
+    ['unsupported-input-surface', env => { env.editor.style.display = 'contents'; }],
+    ['ownership-conflict', env => { const foreign = env.document.createElement('div'); foreign.setAttribute('data-codex-usage-bar', ''); env.document.body.append(foreign); }]
+  ];
+  for (const [reason, change] of cases) {
+    const env = environment(); env.composer.removeAttribute('data-composer-placement');
+    env.portal.setAttribute('data-above-composer-conversation-id', CACHE_THREAD); change(env);
+    const api = env.install(false); assert.equal(api.inspect().reason, reason);
+    assert.equal(api.inspect().status, 'unmounted'); api.dispose();
+  }
+  const env = environment(); env.composer.removeAttribute('data-composer-placement');
+  env.editor.box = { x: 100, y: 230, left: 100, top: 230, right: 700, bottom: 330, width: 600, height: 100 };
+  const api = env.install(false);
+  assert.equal(api.inspect().status, 'hidden'); assert.equal(api.inspect().reason, 'native-overlap'); api.dispose();
+});
+
+test('inferred placement clears cache when its association is lost, invalidated or changed', () => {
+  for (const association of [null, '', 'malformed-id', OTHER_CACHE_THREAD]) {
+    const env = environment(); env.composer.removeAttribute('data-composer-placement');
+    env.portal.setAttribute('data-above-composer-conversation-id', CACHE_THREAD); cacheSidebarRow(env);
+    const api = env.install(false); api.setAccountSnapshot(snapshot(env));
+    const bar = () => env.mounted()?.shadowRoot.querySelector('.cbu-bar');
+    env.window.dispatchEvent(tokenUsageEvent(800, 300)); assert.equal(label(bar(), 'cache'), '37.5%');
+    if (association === null) env.portal.removeAttribute('data-above-composer-conversation-id');
+    else env.portal.setAttribute('data-above-composer-conversation-id', association);
+    env.mutate(); env.flush();
+    assert.notEqual(api.inspect().cacheStatus, 'fresh');
+    if (bar()) assert.equal(label(bar(), 'cache'), '—');
+    else assert.equal(api.inspect().reason, 'unsupported-composer');
+    env.window.dispatchEvent(tokenUsageEvent(800, 800)); assert.notEqual(api.inspect().cacheStatus, 'fresh');
+    env.portal.setAttribute('data-above-composer-conversation-id', CACHE_THREAD); env.mutate(); env.flush();
+    assert.equal(api.inspect().status, 'mounted'); assert.equal(api.inspect().cacheStatus, 'waiting');
+    assert.equal(label(bar(), 'cache'), '—', 'restoring an association must not revive old counts');
+    env.window.dispatchEvent(tokenUsageEvent(1000, 400)); assert.equal(label(bar(), 'cache'), '40%'); api.dispose();
+  }
+});
+
+test('native-room own slot is a pure daily enhancement with unknown cache and complete cleanup', () => {
+  const {env,shell,decoration,slot} = roomFixture(), instances = sprigStub(env);
+  const initialStyles = [env.composer.style, shell.style, decoration.style].map(style=>JSON.stringify(style));
+  const api = env.install(false); api.setAccountSnapshot(snapshot(env));
+  assert.equal(api.inspect().status,'mounted'); assert.equal(api.inspect().layout.mode,'owned-room-flow');
+  const owned = slot(), host = env.mounted();
+  assert.ok(owned); assert.equal(owned.hasAttribute('data-above-composer-portal'),false);
+  assert.equal(owned.parentElement,env.composer); assert.equal(env.composer.children.indexOf(owned)+1,env.composer.children.indexOf(shell));
+  assert.equal(host.parentElement,owned); assert.equal(api.inspect().cacheStatus,'unavailable');
+  cacheSidebarRow(env); env.window.dispatchEvent(tokenUsageEvent(800,300));
+  assert.equal(api.inspect().cacheStatus,'unavailable');
+  for(let i=0;i<10;i++){ api.inspect(); api.setAccountSnapshot(snapshot(env)); }
+  assert.equal(slot(),owned); assert.equal(env.mounted(),host); assert.equal(instances.length,1);
+  assert.deepEqual([env.composer.style,shell.style,decoration.style].map(style=>JSON.stringify(style)),initialStyles);
+  api.dispose(); assert.equal(slot(),null); assert.equal(env.mounted(),null); assert.equal(instances[0].destroys,1);
+  assert.deepEqual(env.composer.children,[decoration,shell]);
+});
+
+test('native-room rejects structural near-matches, foreign slots and isolated home mode', () => {
+  for(const [reason,change] of [
+    ['unsupported-composer',f=>f.env.composer.setAttribute('data-composer-placement','unknown')],
+    ['ambiguous-portal',f=>f.env.composer.setAttribute('data-composer-placement','thread')],
+    ['unsupported-room-structure',f=>{f.env.composer.style.display='flex'}],
+    ['unsupported-room-structure',f=>{f.env.composer.style.position='fixed'}],
+    ['unsupported-room-structure',f=>{f.shell.style.position='absolute'}],
+    ['unsupported-room-structure',f=>{f.decoration.style.pointerEvents='auto'}],
+    ['unsupported-room-structure',f=>{f.env.composer.append(f.env.document.createElement('div'))}],
+    ['ambiguous-portal',f=>{const p=f.env.document.createElement('div');p.setAttribute('data-above-composer-portal','');f.shell.append(p)}],
+    ['ambiguous-editor',f=>{const e=f.env.document.createElement('div');e.className='ProseMirror';e.setAttribute('contenteditable','true');f.shell.append(e)}],
+    ['ownership-conflict',f=>{const n=f.env.document.createElement('div');n.setAttribute('data-codex-usage-bar-slot','');f.env.document.body.append(n)}]
+  ]){const f=roomFixture();change(f);const api=f.env.install(false);assert.equal(api.inspect().reason,reason);assert.equal(f.slot(),null);api.dispose()}
+  const f=roomFixture(),api=f.env.install(true);assert.equal(api.inspect().reason,'unsupported-composer');assert.equal(f.slot(),null);api.dispose();
+});
+
+test('unsafe own-slot probing removes its reservation and does not remount until meaningful change', () => {
+  const {env,geometry,slot}=roomFixture({unsafe:true}),instances=sprigStub(env),api=env.install(false);
+  assert.equal(api.inspect().status,'hidden');assert.equal(api.inspect().reason,'native-overlap');
+  assert.equal(slot(),null);assert.equal(env.mounted(),null);assert.equal(instances[0].destroys,1);
+  assert.equal(api.inspect().layout.reservedHeight,0);
+  api.setAccountSnapshot(snapshot(env));const attempts=instances.length;
+  for(let i=0;i<12;i++){env.tick(100);api.setAccountSnapshot(snapshot(env));env.mutate();env.flush()}
+  assert.equal(instances.length,attempts,'timestamps and own mutation must not cause mount loops');
+  env.document.documentElement.setAttribute('data-theme','dark');env.mutate();env.flush();
+  assert.equal(instances.length,attempts+1,'theme change merits one new measurement');
+  geometry.unsafe=false;geometry.bottom-=10;env.mutate();env.flush();
+  assert.equal(api.inspect().status,'mounted');assert.ok(slot());api.dispose();assert.equal(slot(),null);
+  const fixed=roomFixture();fixed.geometry.fixedHeight=true;const fixedApi=fixed.env.install(false);
+  assert.equal(fixedApi.inspect().reason,'unsupported-room-reservation');assert.equal(fixed.slot(),null);fixedApi.dispose();
+});
+
+test('own-slot replacement and migration clean old companions and preserve native portal ownership', () => {
+  const f=roomFixture(),instances=sprigStub(f.env),api=f.env.install(false);const old=f.slot();
+  old.remove();f.env.mutate();f.env.flush();assert.notEqual(f.slot(),old);assert.equal(instances[0].destroys,1);assert.equal(instances.length,2);
+  const second=f.slot(),native=f.env.document.createElement('div');native.setAttribute('data-above-composer-portal','');native.setAttribute('data-above-composer-conversation-id',CACHE_THREAD);
+  f.env.composer.insertBefore(native,f.shell);f.env.mutate();f.env.flush();
+  assert.equal(second.isConnected,false);assert.equal(f.slot(),null);assert.equal(instances[1].destroys,1);
+  assert.equal(f.env.mounted().parentElement,native);assert.equal(api.inspect().cacheStatus,'waiting');
+  api.dispose();assert.equal(native.isConnected,true);assert.equal(f.slot(),null);
+});
+
+test('own-slot initialization and destroy exceptions never leave an owned container behind', () => {
+  const f=roomFixture();f.env.window.CodexUsageBar={mount(){throw new Error('fixture renderer error')}};
+  assert.throws(()=>f.env.install(false),/install-failed/);assert.equal(f.slot(),null);assert.equal(f.env.mounted(),null);
+  const g=roomFixture(),original=g.env.window.CodexUsageBar.mount;
+  g.env.window.CodexUsageBar={mount(...args){const mounted=original(...args);const destroy=mounted.destroy;mounted.destroy=()=>{destroy();throw new Error('fixture release error')};return mounted}};
+  const second=g.env.install(false);second.dispose();assert.equal(g.slot(),null);assert.equal(g.env.mounted(),null);
 });
 
 test('persistent mode refuses other origins, credentials and debug ports', () => {
@@ -909,7 +1199,8 @@ test('inspection exposes no cache identity or counts and disposal releases the p
   assert.equal(inspection.cacheStatus, 'fresh');
   for (const privateValue of [CACHE_THREAD, CACHE_HOST, '987654321', '123456789',
     'inputTokens', 'cachedInputTokens', 'threadId', 'hostId']) assert.equal(serialized.includes(privateValue), false);
-  assert.deepEqual(Object.keys(inspection).sort(), ['cacheStatus', 'homeOnly', 'layout', 'reason', 'status']);
+  assert.deepEqual(Object.keys(inspection).sort(), ['cacheStatus', 'companion', 'homeOnly', 'layout', 'reason', 'status']);
+  assert.equal(inspection.companion, null);
   api.dispose(); assert.equal(env.window.events.get('message').size, 0); assert.equal(env.window.listenerCount(), 0);
   env.window.dispatchEvent(tokenUsageEvent(100, 100)); assert.equal(env.mounted(), null);
   assert.equal(env.frames.size + env.timers.size + env.intervals.size, 0);

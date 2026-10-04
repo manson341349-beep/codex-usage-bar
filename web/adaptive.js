@@ -11,6 +11,7 @@
   const PERSISTENT_EDITOR = EDITOR + ',.ProseMirror[contenteditable="false"]';
   const TURNS = '[data-content-search-turn-key],[data-turn-key]';
   const MARKER = '[data-codex-usage-bar]';
+  const SLOT_MARKER = '[data-codex-usage-bar-slot]';
   const HEARTBEAT_MS = 15000;
   const MAX_ANCESTORS = 64;
   const EPSILON = 0.5;
@@ -152,6 +153,8 @@
 
     let disposed = false;
     let host = null;
+    let ownedSlot = null;
+    let blockedRoom = null;
     let mounted = null;
     let target = null;
     let composingEditor = null;
@@ -205,18 +208,25 @@
       const roots = Array.from(document.querySelectorAll(ROOT)).filter(shown);
       if (roots.length !== 1) return { reason: homeOnly ? 'ambiguous-home' : 'ambiguous-composer' };
       const root = roots[0];
-      const placement = root.getAttribute('data-composer-placement');
-      if (placement !== 'home' && (homeOnly || placement !== 'thread')) {
+      let placement = root.getAttribute('data-composer-placement');
+      if (homeOnly ? placement !== 'home' :
+          placement !== 'home' && placement !== 'thread' && placement !== null) {
         return { reason: 'unsupported-composer' };
       }
       const portals = Array.from(root.children).filter(node => node.matches(PORTAL));
-      if (portals.length !== 1) return { reason: 'ambiguous-portal' };
-      const portal = portals[0];
-      if (['absolute', 'fixed'].includes(window.getComputedStyle(portal).position)) {
+      if (portals.length > 1) return { reason: 'ambiguous-portal' };
+      let portal = portals[0] || null;
+      const room = !homeOnly && placement === null && portal === null;
+      if (!portal && (!room || root.querySelector(PORTAL))) return { reason: 'ambiguous-portal' };
+      if (portal && ['absolute', 'fixed'].includes(window.getComputedStyle(portal).position)) {
         return { reason: 'unsupported-portal-flow' };
       }
-      // The isolated home-only mode rejects an association using a structural
-      // selector. Daily cache binding reads only the selected portal's UUID.
+      if (placement === null && portal) {
+        const association = portal.getAttribute('data-above-composer-conversation-id');
+        if (association === null || association === '') placement = 'home';
+        else if (THREAD_ID.test(association)) placement = 'thread';
+        else return { reason: 'unsupported-composer' };
+      }
       if (homeOnly && portal.hasAttribute('data-above-composer-conversation-id') &&
           !portal.matches('[data-above-composer-conversation-id=""]')) {
         return { reason: 'conversation-associated' };
@@ -226,17 +236,60 @@
       if (editors.length !== 1 || !shown(editors[0])) return { reason: 'ambiguous-editor' };
       if (homeOnly && editors[0] === composingEditor) return { reason: 'editor-composing' };
       if (homeOnly && !emptyEditor(editors[0])) return { reason: 'nonempty-editor' };
-      // Use the structural input branch, not the narrower text-editing area.
-      // No module-specific class names or editor text are needed.
       const inputAncestors = ancestorChain(editors[0]);
       const rootIndex = inputAncestors ? inputAncestors.indexOf(root) : -1;
       const shell = rootIndex > 0 ? inputAncestors[rootIndex - 1] : null;
       if (!shell || shell === portal || window.getComputedStyle(shell).display === 'contents' ||
           !shown(shell)) return { reason: 'unsupported-input-surface' };
-      if (!ancestorChain(portal)) return { reason: 'unsupported-ancestry' };
-      const foreign = Array.from(document.querySelectorAll(MARKER)).some(node => node !== host);
+      if (room) {
+        // The installed Orbit/native-room surface has no native portal. Accept
+        // only its observed two-branch structure, never an arbitrary body anchor.
+        const children = Array.from(root.children).filter(node => node !== ownedSlot);
+        const rootStyle = window.getComputedStyle(root), shellStyle = window.getComputedStyle(shell);
+        const decoration = children[0], decorationStyle = decoration && window.getComputedStyle(decoration);
+        if (children.length !== 2 || children[1] !== shell ||
+            children.some(node => node.tagName !== 'DIV') || rootStyle.display !== 'block' ||
+            rootStyle.position !== 'relative' || shellStyle.display !== 'block' ||
+            !['static', 'relative'].includes(shellStyle.position) ||
+            (shellStyle.cssFloat || 'none') !== 'none' || !decorationStyle ||
+            decorationStyle.position !== 'absolute' || decorationStyle.pointerEvents !== 'none' ||
+            decoration.querySelector(PERSISTENT_EDITOR + ',' + PORTAL)) {
+          return { reason: 'unsupported-room-structure' };
+        }
+        if (ownedSlot && ownedSlot.parentElement === root) {
+          const siblings = Array.from(root.children), index = siblings.indexOf(ownedSlot);
+          if (siblings[index + 1] !== shell || ownedSlot.children.length !== 1 || ownedSlot.children[0] !== host) {
+            return { reason: 'ownership-conflict' };
+          }
+          portal = ownedSlot;
+        }
+        placement = 'room'; // No trustworthy UUID: never bind cache to a guessed session.
+      }
+      if (!ancestorChain(portal || root)) return { reason: 'unsupported-ancestry' };
+      const foreign = Array.from(document.querySelectorAll(MARKER + ',' + SLOT_MARKER))
+        .some(node => node !== host && node !== ownedSlot);
       if (foreign) return { reason: 'ownership-conflict' };
-      return { root: root, portal: portal, editor: editors[0], shell: shell, placement: placement };
+      // Pure selection: snapshot/cache refresh also calls this function.
+      return { root: root, portal: portal, editor: editors[0], shell: shell,
+        placement: placement, ownSlot: room };
+    }
+
+    function roomFingerprint(plan) {
+      // Retry meaningful content/theme changes without treating heartbeat timestamps
+      // as layout changes (which would repeatedly recreate an unsafe renderer).
+      const values = [viewport(), theme(), effective.status, effective.stale,
+        effective.cache && effective.cache.status];
+      for (const key of ['primary', 'secondary']) {
+        const value = effective.limits && effective.limits[key];
+        values.push(value && value.status, value && value.usedPercent);
+      }
+      for (const node of [plan.editor, plan.shell].concat(ancestorChain(plan.root) || [])) {
+        const style = window.getComputedStyle(node);
+        values.push(rect(node), style.display, style.position, style.overflowX,
+          style.overflowY, style.transform, style.zoom, style.paddingLeft, style.paddingRight,
+          style.fontFamily, style.fontSize, style.fontWeight, style.lineHeight);
+      }
+      return JSON.stringify(values);
     }
 
     function syncCacheThread() {
@@ -432,6 +485,13 @@
         mounted.element.scrollWidth > mounted.element.clientWidth + 1;
       const aligned = [bar, content].every(box => Math.abs(box.left - shell.left) <= EPSILON &&
         Math.abs(box.right - shell.right) <= EPSILON);
+      // A room insertion must actually reserve height through its owning branch.
+      // Overflow-visible fixed-height wrappers do not prove safe native layout.
+      const roomReserved = !target.ownSlot || (ancestorChain(target.root) || []).every(node => {
+        const box = rect(node);
+        return contained(bar, box, false, true) && contained(content, box, false, true) &&
+          contained(shell, box, false, true);
+      });
       let failure = alignmentFailure;
       if (failure) { /* Preserve the failed neutral probe. */ }
       else if (!validRect(bar) || !validRect(content) || !validRect(editor) ||
@@ -440,12 +500,13 @@
       else if (overflow) failure = 'content-overflow';
       else if (overlaps) failure = 'native-overlap';
       else if (portalOverlap) failure = 'native-portal-overlap';
+      else if (!roomReserved) failure = 'unsupported-room-reservation';
       else if (Math.max(bar.bottom, content.bottom) > Math.min(editor.top, shell.top) + EPSILON) failure = 'unsupported-order';
       else if (clipped) failure = 'ancestor-clipped';
       else if (!inside) failure = 'outside-viewport';
       else if (!aligned) failure = 'input-misaligned';
       return {
-        mode: 'native-flow', visible: failure === null, hiddenReason: failure,
+        mode: target.ownSlot ? 'owned-room-flow' : 'native-flow', visible: failure === null, hiddenReason: failure,
         root: rect(target.root), portal: rect(target.portal), bar: bar, editor: editor, shell: shell,
         gapToNativeContent: Math.min(editor.top, shell.top) - Math.max(bar.bottom, content.bottom),
         overlapsNativeContent: overlaps || portalOverlap, clippedByAncestor: clipped, barWithinViewport: inside,
@@ -455,6 +516,7 @@
     }
 
     function hide(measured) {
+      mounted.setVisible(false);
       host.style.setProperty('display', 'none', 'important');
       host.style.setProperty('visibility', 'hidden', 'important');
       hiddenFingerprint = fingerprint();
@@ -471,7 +533,10 @@
     }
 
     function checkLayout() {
-      if (hiddenFingerprint !== null && fingerprint() === hiddenFingerprint) return;
+      if (hiddenFingerprint !== null && fingerprint() === hiddenFingerprint) {
+        mounted.setVisible(false);
+        return;
+      }
       // Probe and collapse happen in one JS task; the unsafe bar is never painted.
       host.style.setProperty('visibility', 'hidden', 'important');
       host.style.setProperty('display', 'block', 'important');
@@ -480,11 +545,22 @@
       if (!measured.visible && mounted.closeInfo()) measured = measure(alignToInput());
       naturalHeight = measured.naturalHeight;
       if (!measured.visible) {
+        if (target.ownSlot) {
+          const plan = { ...target, portal: null };
+          unmount(measured.hiddenReason);
+          blockedRoom = { plan: plan, reason: measured.hiddenReason, fingerprint: roomFingerprint(plan) };
+          layout = { ...measured, mode: 'owned-room-flow', visible: false, reservedHeight: 0,
+            portal: null, bar: null, root: rect(plan.root), shell: rect(plan.shell), editor: rect(plan.editor) };
+          state = 'hidden';
+          observeGeometry();
+          return;
+        }
         hide(measured);
         return;
       }
       hiddenFingerprint = null;
       host.style.setProperty('visibility', 'visible', 'important');
+      mounted.setVisible(document.visibilityState !== 'hidden' && document.hidden !== true);
       layout = measured;
       state = 'mounted';
       reason = homeOnly ? 'home-ready' : 'composer-ready';
@@ -492,11 +568,12 @@
 
     function observeGeometry() {
       const wanted = new Set([document.documentElement]);
-      if (target) {
-        wanted.add(target.editor);
-        wanted.add(target.shell);
-        for (const ancestor of ancestorChain(target.portal) || []) wanted.add(ancestor);
-        for (const node of target.portal.children) if (node !== host) wanted.add(node);
+      const plan = target || (blockedRoom && blockedRoom.plan);
+      if (plan) {
+        wanted.add(plan.editor);
+        wanted.add(plan.shell);
+        for (const ancestor of ancestorChain(plan.portal || plan.root) || []) wanted.add(ancestor);
+        if (plan.portal) for (const node of plan.portal.children) if (node !== host) wanted.add(node);
       }
       for (const node of observed) {
         if (!wanted.has(node)) { resize.unobserve(node); observed.delete(node); }
@@ -509,6 +586,8 @@
     function unmount(nextReason) {
       const previous = mounted;
       const previousHost = host;
+      const previousSlot = ownedSlot;
+      ownedSlot = null;
       mounted = null;
       host = null;
       target = null;
@@ -518,13 +597,30 @@
       naturalHeight = 0;
       state = 'unmounted';
       reason = nextReason;
-      try { if (previous) previous.destroy(); }
-      finally { if (previousHost) previousHost.remove(); }
+      try {
+        if (previous) {
+          try { if (typeof previous.setVisible === 'function') previous.setVisible(false); }
+          finally { previous.destroy(); }
+        }
+      }
+      finally {
+        if (previousHost) previousHost.remove();
+        if (previousSlot) previousSlot.remove();
+      }
       if (resize && !disposed) observeGeometry();
     }
 
     function mount(next) {
-      target = next;
+      target = { ...next };
+      if (next.ownSlot) {
+        ownedSlot = document.createElement('div');
+        knownHosts.add(ownedSlot);
+        ownedSlot.setAttribute('data-codex-usage-bar-slot', '');
+        ownedSlot.style.cssText = 'display:block!important;position:relative!important;box-sizing:border-box!important;' +
+          'width:100%!important;min-width:0!important;height:auto!important;margin:0!important;padding:0!important;border:0!important;';
+        next.root.insertBefore(ownedSlot, next.shell);
+        target.portal = ownedSlot;
+      }
       host = document.createElement('div');
       knownHosts.add(host);
       host.setAttribute('data-codex-usage-bar', '');
@@ -541,11 +637,11 @@
       shadow.append(stylesheet, container);
       target.portal.append(host);
       currentTheme = theme();
-      const result = window.CodexUsageBar.mount(container, { accountOnly: true, theme: currentTheme });
+      const result = window.CodexUsageBar.mount(container, { accountOnly: true, theme: currentTheme, visible: false });
       // Retain even an incomplete return value so its destroy method can run on failure.
       mounted = result;
       if (!mounted || typeof mounted.update !== 'function' || typeof mounted.destroy !== 'function' ||
-          typeof mounted.setTheme !== 'function' || !(mounted.element instanceof Element) ||
+          typeof mounted.setTheme !== 'function' || typeof mounted.setVisible !== 'function' || !(mounted.element instanceof Element) ||
           !container.contains(mounted.element)) throw new Error('usage-bar-invalid-renderer');
       mounted.update(effective);
       observeGeometry();
@@ -556,13 +652,21 @@
       reconciling = true;
       try {
         const next = candidate();
-        if (!next.root) { refreshSnapshot(); unmount(next.reason); return; }
+        if (!next.root) { blockedRoom = null; refreshSnapshot(); unmount(next.reason); return; }
+        refreshSnapshot();
+        if (!next.ownSlot) blockedRoom = null;
+        if (!host && next.ownSlot && blockedRoom && blockedRoom.plan.root === next.root &&
+            blockedRoom.plan.shell === next.shell && blockedRoom.plan.editor === next.editor &&
+            blockedRoom.fingerprint === roomFingerprint(next)) {
+          state = 'hidden'; reason = blockedRoom.reason;
+          return;
+        }
+        blockedRoom = null;
         if (host && (!host.isConnected || host.parentElement !== next.portal || !target ||
             target.root !== next.root || target.portal !== next.portal || target.editor !== next.editor ||
             target.shell !== next.shell)) {
           unmount(homeOnly ? 'home-replaced' : 'composer-replaced');
         }
-        refreshSnapshot();
         if (!host) mount(next);
         const nextTheme = theme();
         if (nextTheme !== currentTheme) {
@@ -604,6 +708,7 @@
       try { unmount('disposed'); } catch (_) { /* host removal is in unmount's finally */ }
       latest = emptySnapshot('disconnected');
       cacheThread = cacheHost = cacheReading = null;
+      blockedRoom = null;
       composingEditor = null;
       effective = latest;
       effectiveKey = '';
@@ -627,6 +732,7 @@
         // Fixed state labels and numeric geometry only: no DOM nodes, identifiers or text.
         return { status: state, reason: reason, homeOnly: homeOnly,
           cacheStatus: effective.cache ? effective.cache.status : 'unavailable',
+          companion: mounted && typeof mounted.inspectCompanion === 'function' ? mounted.inspectCompanion() : null,
           layout: layout === null ? null : JSON.parse(JSON.stringify(layout)) };
       },
       dispose: dispose
@@ -649,7 +755,7 @@
       mutation.observe(document.documentElement, {
         subtree: true, childList: true, attributes: true,
         attributeFilter: ['class', 'style', 'hidden', 'inert', 'aria-hidden', 'contenteditable',
-          'data-theme', 'data-codex-composer-root', 'data-composer-placement',
+          'data-theme', 'data-codex-composer-root', 'data-composer-placement', 'data-codex-usage-bar-slot',
           'data-above-composer-portal', 'data-above-composer-conversation-id',
           'data-app-action-sidebar-thread-id', 'data-app-action-sidebar-thread-kind',
           'data-app-action-sidebar-thread-host-id', 'data-app-shell-active-page',

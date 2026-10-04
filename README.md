@@ -1,6 +1,6 @@
 # codex-usage-bar
 
-Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.7.3，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+Codex 日常桌面实例的额度信息栏，带原创软胶风格 3D 角色芽团 Sprig。版本 **0.8.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
 
 > **在日常 Codex 的原生输入框上方显示额度，首页和会话页面都可使用。** 继续使用原有账号、历史、设置和项目；输入文字、输入法组合输入和进入会话不再主动卸载横条。它是原版 Codex 的启动伴侣，不修改官方应用安装包。
 >
@@ -15,6 +15,8 @@ Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 
 ```sh
 python3 platforms/macos/install.py
 ```
+
+发布源码包已包含本地 Sprig 运行文件，正常安装和运行不需要 Node.js、npm 或在线模型下载。只有修改角色源码并重新生成 bundle 时才需要下方的开发依赖。
 
 随后双击 `~/Applications/codex-usage-bar.app`，或运行：
 
@@ -36,12 +38,17 @@ open "$HOME/Applications/codex-usage-bar.app"
 
 - 额度条左右边缘对齐原生输入框外壳，跟随窗口宽度及缩放；展开、折叠和查看详情时保持同宽。只调整自有信息栏，不修改原生输入框样式。
 - 在原生首页和会话输入框上方挂载独立的 Shadow DOM 信息栏；打字、输入法组合输入及切换会话时持续跟随输入框，不替换输入框，不读取输入正文或聊天内容。
+- 日常模式兼容没有原生上方 portal 的 room 输入区：仅在已知双分支结构和几何检查通过时，在输入框外壳前创建正常文档流中的自有插槽，不修改原生节点样式。空间不足或结构不符时移除插槽；原有 portal 路径保留严格检查。
 - 经官方 CLI 的只读 `account/read` 和 `account/rateLimits/read` 获取订阅额度，约每 60 秒刷新。每周订阅显示**剩余百分比**（100% − 官方已用比例），数字与进度条口径一致；5 小时仍显示已用比例。
 - 5h 或每周窗口缺失、身份不明、数据过期或待重置时明确显示未知/状态；**缺数据不表示无限制**。没有账户绑定的“用户确认无限制”设置。
 - 缓存命中来自 Codex 已有的会话统计通知，按当前会话累计缓存输入 token ÷ 累计输入 token 计算；折叠行也保留缓存读数。仅匹配当前输入框的会话 UUID 与侧栏主机标识；两者缺失、冲突或计数无效时显示未知/等待，切换时立即清掉旧统计。初次接入、页面刷新或切换到其他会话后，需要下一条真实统计通知才显示；不回读历史日志。超过两分钟无新通知会标为“上次统计”。这不是上下文占用率，也不等于全账户缓存命中率。
-- 外观直接继承 Codex 当前主题的背景、文字、边框及强调色；进度条和 Milo 随强调色变化。切换明暗或自定义配色时通过 CSS 自动更新，无需重启。宿主主题变量不可用时回退到内置明暗配色；这些变量属于 Codex 内部接口。
-- 真实工作事件仍未接入。Milo 动画不表示模型正在生成。
-- 箭头可折叠为单行额度摘要，再次点击展开；点击 `i` 查看来源说明，再次点击、点击外部或按 Esc 关闭。鼠标经过或键盘聚焦不再自动展开详情。动画尊重减少动态效果；不承诺 GPU 稳定 60 fps。
+- room 输入区未提供可验证的会话关联时，缓存显示未知，额度仍正常刷新；不会猜测会话归属。具有有效会话 UUID 与主机匹配的原有 thread 输入区继续使用真实缓存通知。
+- 外观继承 Codex 当前主题的背景、文字、边框及强调色；Sprig 保留薄荷色主体，并轻微融合主题强调色、调整明暗曝光。切换明暗或自定义配色无需重启。宿主主题变量不可用时回退到内置明暗配色；这些变量属于 Codex 内部接口。
+- Sprig 在 **56 × 56 CSS 像素**角色槽中本地渲染，默认正面交流；有待机微动作、短暂指针注视、悬停/键盘聚焦问候和点击玩耍。造型、材质与动作由项目原创实现，渲染使用随包提供的 Three.js。
+- 箭头可折叠为单行额度摘要；折叠时隐藏角色、停止角色帧循环并移除指针监听，再次展开恢复同一个角色实例。失去可见性或窗口焦点时也暂停；真正卸载时释放几何、材质、纹理与 WebGL 上下文。
+- 系统启用“减少动态效果”时，角色用静止姿态回应，不持续播放动画。WebGL 不可用或渲染失败时回退为清晰的原创 2D Sprig，额度与缓存显示继续工作。
+- 真实工作事件仍未接入，角色动作不表示模型正在生成。工作/完成表演仅属于设计演示，不能作为 Codex 运行状态。
+- 点击 `i` 查看来源说明，再次点击、点击外部或按 Esc 关闭。鼠标经过或键盘聚焦不自动展开详情。性能验收范围见[验证记录](docs/VALIDATION.md)，不承诺所有设备稳定呈现 60 fps。
 - 日常模式支持同一已验证实例中的多个 Codex 应用页面，并在页面重载或输入框被替换后重新挂载。仅支持默认资料路径；不主动切换会话、导航页面或发送消息。
 - 有兼容的原生输入框时才显示：登录、设置等没有输入框的页面，以及无法确认输入框位置或空间不足的布局会隐藏横条。DOM 是 Codex 内部接口，应用升级后可能需要适配。
 - 启动或连接失败会保留日常 Codex；如果它已经带调试参数打开，端口需随本人 Cmd-Q 关闭。不会为修复横条而强退应用。
@@ -63,6 +70,8 @@ python3 -B -m codex_bar daily-status
 
 先在菜单栏“额度”选择退出，使伴侣应用和管理器结束。旧版外部终端入口使用 Ctrl-C 退出。安装器发现管理器锁被占用时会拒绝覆盖。重新运行安装命令升级；旧 `.app` 会保留在 `~/Applications/.codex-usage-bar-backups/`，原有资料不迁移。
 
+已由本启动器启用的日常 Codex 可以保持运行。旧管理器成功清理自有横条后，新版伴侣会验证保存的进程身份和本机端口并重连；这需要重新启动额度条伴侣，不是对正在运行的管理器热替换。若清理或身份核验失败，按明确提示处理，不强行接管旧桥接。
+
 从保留的源码目录卸载：
 
 ```sh
@@ -75,15 +84,25 @@ python3 platforms/macos/install.py --uninstall
 
 额度桥接仅在内存用官方账户元数据生成身份指纹，不输出身份或记录磁盘额度缓存。官方 Codex 自行处理登录和网络；本项目不读取认证文件、聊天历史或输入文本，不发送模型生成请求。当前会话 UUID 和主机标识只在页面内存用于匹配通知，不向后端、日志或公开包导出；通知只复制累计输入与累计缓存输入两个数值。生命周期文件只记录验证进程归属所需的本机元数据，留在私有支持目录，不上传。
 
+角色运行时、建模和动作源码位于 `web/sprig-source/`，Three.js r180 的本地模块位于 `web/vendor/`。开发时使用 Node.js 22 和锁定的 esbuild 0.25.11 生成单份 `web/sprig.js`；该运行文件不从 CDN 加载代码。首次安装开发依赖需要访问 npm：
+
+```sh
+npm ci --ignore-scripts
+node scripts/build-sprig.mjs
+node scripts/build-sprig.mjs --check
+```
+
+`--check` 会重建并逐字节比对已提交的 bundle。修改前端资源后，还须同步更新 `web/asset-manifest.json` 中对应文件的 SHA-256，再运行校验。固定资产白名单仅允许 Sprig bundle 最大 2 MiB，其余 JavaScript/CSS 各自仍限制在 256 KiB；运行包包含 Three.js 的 MIT 许可，开发依赖清单和模块源码只进入源码包。
+
 ```sh
 python3 scripts/validate.py
 python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
 node --test tests/test_frontend.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.7.3-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.8.0-source.zip
 ```
 
-构建只使用白名单源文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 是原创前端，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
+构建只使用白名单文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 包含自有前端与注明许可的 Three.js，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
 
-本项目独立于 OpenAI。自有代码与原创视觉资源采用 [MIT License](LICENSE)，来源范围见 [PROVENANCE](docs/PROVENANCE.md) 和 [NOTICE](NOTICE.md)。不分发或重新授权 Codex、Python、系统组件或早期参考软件。
+本项目独立于 OpenAI。自有代码与原创视觉资源采用 [MIT License](LICENSE)；Three.js 适用随包保留的[上游 MIT 许可](web/THREE-LICENSE.txt)。来源范围见 [PROVENANCE](docs/PROVENANCE.md) 和 [NOTICE](NOTICE.md)。不分发或重新授权 Codex、Python、系统组件或早期参考软件。
