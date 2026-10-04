@@ -1,0 +1,62 @@
+<!doctype html>
+<!-- MIT License — Copyright (c) 2026 codex-usage-bar contributors -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Milo · 设计预览</title>
+  <link rel="stylesheet" href="./bar.css">
+  <style>
+    :root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif; color: #29483c; background: #f3f6f1; color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; padding: 80px 24px; }
+    main { max-width: 720px; margin: 0 auto; }
+    .eyebrow { margin: 0 0 18px; color: #6b8d78; font-size: 11px; font-weight: 600; letter-spacing: .2em; }
+    h1 { margin: 0; font-size: clamp(32px, 6vw, 46px); font-weight: 550; letter-spacing: -.05em; }
+    .intro { margin: 14px 0 42px; color: #7a8d80; font-size: 13px; line-height: 1.8; }
+    .swatch { padding: 34px; border: 1px solid #dce5db; border-radius: 30px; }
+    .swatch + .swatch { margin-top: 20px; }
+    .swatch-light { background: #edf2ea; }
+    .swatch-dark { background: #14201b; border-color: #293e31; }
+    .swatch-title { display: flex; justify-content: space-between; margin: 0 0 21px; color: #87988a; font-size: 10px; font-weight: 500; letter-spacing: .08em; }
+    .bar-host { max-width: 540px; margin: 0 auto; }
+    .note { margin: 28px 0 0; color: #87988a; font-size: 11px; line-height: 1.9; }
+    @media (max-width: 440px) { body { padding: 40px 12px; } .swatch { padding: 24px 0; border: 0; background: transparent; } .swatch-dark { padding: 24px 0; background: #14201b; } .swatch-title { padding: 0 16px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">MILO / CODEX USAGE BAR</p>
+    <h1>留一点余量，慢慢来。</h1>
+    <p class="intro">设计预览 · 示例数据 · 不连接 Codex<br>轻轻呼吸的 Milo，陪你看一眼账户用量。</p>
+    <section class="swatch swatch-light" aria-label="浅色设计预览">
+      <p class="swatch-title"><span>LIGHT / 浅色</span><span>示例数据</span></p>
+      <div class="bar-host" id="light-preview"></div>
+    </section>
+    <section class="swatch swatch-dark" aria-label="深色设计预览">
+      <p class="swatch-title"><span>DARK / 深色</span><span>示例数据</span></p>
+      <div class="bar-host" id="dark-preview"></div>
+    </section>
+    <p class="note">悬停向 Milo 打招呼，点击看看它的回应。<br>按 i 查看示例来源与状态；箭头切换紧凑布局。Cache 在账户来源下始终显示未知。</p>
+  </main>
+  <script src="./bar.js"></script>
+  <script>
+    'use strict';
+    var now = Date.now();
+    var example = {
+      status: 'fresh', stale: false, sourceLabel: '设计预览 / 手工示例数据（不连接 Codex）',
+      updatedAt: new Date(now).toISOString(), working: null,
+      limits: {
+        primary: { usedPercent: 32, windowMinutes: 300, resetsAt: Math.floor(now / 1000) + 10800, status: 'fresh' },
+        secondary: { usedPercent: 68, windowMinutes: 10080, resetsAt: Math.floor(now / 1000) + 259200, status: 'fresh' }
+      }
+    };
+    ['light', 'dark'].forEach(function (theme) {
+      var bar = window.CodexUsageBar.mount(document.getElementById(theme + '-preview'), { accountOnly: true, theme: theme });
+      bar.update(example);
+      window.addEventListener('pagehide', function () { bar.destroy(); }, { once: true });
+    });
+  </script>
+</body>
+</html>

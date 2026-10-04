@@ -1,0 +1,9 @@
+.state/
+.verification/
+evidence/
+dist/
+build/
+__pycache__/
+*.py[cod]
+.DS_Store
+*.app/
