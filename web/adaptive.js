@@ -365,7 +365,9 @@
       // Probe and collapse happen in one JS task; the unsafe bar is never painted.
       host.style.setProperty('visibility', 'hidden', 'important');
       host.style.setProperty('display', 'block', 'important');
-      const measured = measure();
+      let measured = measure();
+      // Details must never make the entire bar disappear with no close control.
+      if (!measured.visible && mounted.closeInfo()) measured = measure();
       naturalHeight = measured.naturalHeight;
       if (!measured.visible) {
         hide(measured);

@@ -84,6 +84,8 @@ function environment({ renderer = true, adapter = true } = {}) {
       return node === this.ownerDocument.documentElement || Boolean(node.host?.isConnected);
     }
     focus() {
+      const previous = this.ownerDocument.activeElement;
+      if (previous?.shadowRoot) previous.shadowRoot.activeElement = null;
       const scope = this.getRootNode(); scope.activeElement = this;
       this.ownerDocument.activeElement = scope.host || this;
       this.dispatchEvent({ type: 'focus' });
@@ -211,18 +213,91 @@ test('stale usage is explicit and account changes remove prior percentages', () 
   assert.equal(label(bar.element, 'primary'), '—'); bar.destroy();
 });
 
-test('source panel focus works inside shadow DOM and click/compact/pet cleanup remain functional', () => {
+test('source panel opens only on click and keeps its disclosure state accessible', () => {
   const env = environment({ adapter: false }), bar = mountBar(env), root = bar.element;
   const info = root.querySelector('.cbu-info'), panel = root.querySelector('.cbu-source-panel');
-  info.focus(); root.dispatchEvent({ type: 'pointerleave' }); assert.equal(panel.hidden, false);
-  root.dispatchEvent({ type: 'keydown', key: 'Escape', stopPropagation() {} }); assert.equal(panel.hidden, true);
+  assert.equal(info.getAttribute('aria-controls'), panel.id);
+  assert.equal(info.getAttribute('aria-expanded'), 'false');
+  info.dispatchEvent({ type: 'pointerenter' }); info.focus();
+  assert.equal(panel.hidden, true); assert.equal(info.getAttribute('aria-expanded'), 'false');
+  info.dispatchEvent({ type: 'click' });
+  assert.equal(panel.hidden, false); assert.equal(info.getAttribute('aria-expanded'), 'true');
+  info.dispatchEvent({ type: 'pointerleave' }); root.dispatchEvent({ type: 'pointerleave' });
+  assert.equal(panel.hidden, false);
+  info.dispatchEvent({ type: 'click' });
+  assert.equal(panel.hidden, true); assert.equal(info.getAttribute('aria-expanded'), 'false');
+  info.dispatchEvent({ type: 'click' });
+  let stopped = 0;
+  root.dispatchEvent({ type: 'keydown', key: 'Escape', stopPropagation() { stopped++; } });
+  assert.equal(panel.hidden, true); assert.equal(info.getAttribute('aria-expanded'), 'false');
+  assert.equal(root.getRootNode().activeElement, info); assert.equal(stopped, 1);
+  root.dispatchEvent({ type: 'keydown', key: 'Escape', stopPropagation() { stopped++; } });
+  assert.equal(stopped, 1); bar.destroy();
+});
+
+test('outside pointer closes details without consuming native events and shadow clicks stay inside', () => {
+  const env = environment({ adapter: false }), bar = mountBar(env), root = bar.element;
+  const info = root.querySelector('.cbu-info'), panel = root.querySelector('.cbu-source-panel');
+  info.dispatchEvent({ type: 'click' });
+  const shadow = root.getRootNode();
+  env.document.dispatchEvent({ type: 'pointerdown', target: shadow.host,
+    composedPath: () => [panel, root, shadow, shadow.host, env.document],
+    preventDefault() { assert.fail('internal click was cancelled'); },
+    stopPropagation() { assert.fail('internal click propagation was stopped'); } });
+  assert.equal(panel.hidden, false);
+  env.document.dispatchEvent({ type: 'pointerdown', target: panel });
+  assert.equal(panel.hidden, false);
+  let continued = 0;
+  const observer = () => { continued++; };
+  env.document.addEventListener('pointerdown', observer);
+  env.document.dispatchEvent({ type: 'pointerdown', target: env.editor,
+    composedPath: () => [env.editor, env.composer, env.document],
+    preventDefault() { assert.fail('native composer event was cancelled'); },
+    stopPropagation() { assert.fail('native composer event propagation was stopped'); } });
+  assert.equal(panel.hidden, true); assert.equal(info.getAttribute('aria-expanded'), 'false');
+  assert.equal(continued, 1);
+  env.document.removeEventListener('pointerdown', observer); bar.destroy();
+  assert.equal(env.document.listenerCount(), 0);
+});
+
+test('focus moving within the shadow bar retains details and focus leaving closes them', () => {
+  const env = environment({ adapter: false }), bar = mountBar(env), root = bar.element;
+  const info = root.querySelector('.cbu-info'), panel = root.querySelector('.cbu-source-panel');
+  info.focus(); info.dispatchEvent({ type: 'click' });
+  root.querySelector('.cbu-toggle').focus(); root.dispatchEvent({ type: 'focusout' }); env.tick(0);
+  assert.equal(panel.hidden, false);
+  env.editor.focus(); root.dispatchEvent({ type: 'focusout' }); env.tick(0);
+  assert.equal(panel.hidden, true); assert.equal(info.getAttribute('aria-expanded'), 'false');
+  bar.destroy(); assert.equal(env.timers.size, 0);
+});
+
+test('collapse closes details, updates disclosure labels, and preserves state across data refresh', () => {
+  const env = environment({ adapter: false }), bar = mountBar(env), root = bar.element;
+  const info = root.querySelector('.cbu-info'), panel = root.querySelector('.cbu-source-panel');
+  const toggle = root.querySelector('.cbu-toggle');
+  info.dispatchEvent({ type: 'click' }); toggle.dispatchEvent({ type: 'click' });
+  assert.equal(root.dataset.mode, 'compact'); assert.equal(panel.hidden, true);
+  assert.equal(info.getAttribute('aria-expanded'), 'false');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(toggle.getAttribute('aria-label'), '展开用量条');
+  bar.update(snapshot(env)); assert.equal(root.dataset.mode, 'compact');
+  assert.equal(label(root, 'secondary'), '45%'); assert.equal(label(root, 'primary'), '12%');
   info.dispatchEvent({ type: 'click' }); assert.equal(panel.hidden, false);
-  info.dispatchEvent({ type: 'click' }); assert.equal(panel.hidden, true);
-  root.querySelector('.cbu-toggle').dispatchEvent({ type: 'click' }); assert.equal(root.dataset.mode, 'compact');
+  toggle.dispatchEvent({ type: 'click' });
+  assert.equal(root.dataset.mode, 'expanded'); assert.equal(panel.hidden, true);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(toggle.getAttribute('aria-label'), '收起用量条'); bar.destroy();
+});
+
+test('renderer disposal removes document listeners and pending focus and greeting timers', () => {
+  const env = environment({ adapter: false }), bar = mountBar(env), root = bar.element;
+  assert.equal(env.document.listenerCount(), 1);
   const pet = root.querySelector('.cbu-pet'); pet.dispatchEvent({ type: 'click' }); assert.equal(pet.classList.contains('is-nodding'), true);
   env.tick(650); assert.equal(pet.classList.contains('is-nodding'), false);
-  pet.dispatchEvent({ type: 'click' }); bar.destroy(); bar.destroy();
+  pet.dispatchEvent({ type: 'click' }); root.dispatchEvent({ type: 'focusout' });
+  assert.equal(env.timers.size, 2); bar.destroy(); bar.destroy();
   assert.equal(env.timers.size, 0); assert.equal(pet.listenerCount(), 0); assert.equal(root.listenerCount(), 0);
+  assert.equal(env.document.listenerCount(), 0);
 });
 
 test('adapter mounts exactly one empty home composer and rejects unsupported routes or turns', () => {
@@ -393,6 +468,43 @@ test('unsafe fixture geometry collapses the bar and can recover after resize', (
   api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().status, 'hidden');
   assert.equal(api.inspect().layout.hiddenReason, 'native-overlap'); assert.equal(env.mounted().style.display, 'none');
   delete env.editor.box; api.setAccountSnapshot(snapshot(env)); assert.equal(api.inspect().status, 'mounted'); api.dispose();
+});
+
+test('details that exceed the viewport close before the adapter hides the otherwise safe bar', () => {
+  const env = environment(), api = env.install(false), host = env.mounted();
+  const root = host.shadowRoot.querySelector('.cbu-bar');
+  const info = root.querySelector('.cbu-info'), panel = root.querySelector('.cbu-source-panel');
+  const box = (y, height) => ({ x: 100, y, left: 100, top: y, right: 700,
+    bottom: y + height, width: 600, height });
+  // This fixture models a bottom-anchored composer: a long details panel grows
+  // above the viewport, but closing it restores the safe base bar geometry.
+  host.getBoundingClientRect = () => box(panel.hidden ? 200 : -80, panel.hidden ? 100 : 380);
+  root.getBoundingClientRect = () => box(panel.hidden ? 200 : -80, panel.hidden ? 90 : 380);
+  info.dispatchEvent({ type: 'click' }); assert.equal(panel.hidden, false);
+  // Real composed DOM events are retargeted to the shadow host. The synthetic
+  // DOM does not bubble, so deliver that event at the adapter's document hook.
+  env.document.dispatchEvent({ type: 'codex-usage-bar:layoutchange', target: host }); env.flush();
+  assert.equal(panel.hidden, true); assert.equal(info.getAttribute('aria-expanded'), 'false');
+  assert.equal(api.inspect().status, 'mounted'); assert.equal(api.inspect().layout.visible, true);
+  assert.equal(api.inspect().layout.safety.safe, true);
+  assert.equal(api.inspect().layout.naturalHeight, 90);
+  assert.equal(host.style.display, 'block'); assert.equal(host.style.visibility, 'visible');
+  // Closing must reset the renderer's actual open state, not only its CSS.
+  info.dispatchEvent({ type: 'click' }); assert.equal(panel.hidden, false);
+  api.dispose(); assert.equal(env.document.listenerCount(), 0);
+});
+
+test('closing unsafe details never bypasses geometry protection for an unsafe base bar', () => {
+  const env = environment(), api = env.install(false), host = env.mounted();
+  const root = host.shadowRoot.querySelector('.cbu-bar');
+  const info = root.querySelector('.cbu-info'), panel = root.querySelector('.cbu-source-panel');
+  env.editor.box = { x: 100, y: 230, left: 100, top: 230, right: 700,
+    bottom: 330, width: 600, height: 100 };
+  info.dispatchEvent({ type: 'click' }); assert.equal(panel.hidden, false);
+  env.document.dispatchEvent({ type: 'codex-usage-bar:layoutchange', target: host }); env.flush();
+  assert.equal(panel.hidden, true); assert.equal(info.getAttribute('aria-expanded'), 'false');
+  assert.equal(api.inspect().status, 'hidden'); assert.equal(api.inspect().reason, 'native-overlap');
+  assert.equal(host.style.display, 'none'); api.dispose();
 });
 
 test('renderer failures dispose all observers/timers/listeners and reject further updates', () => {

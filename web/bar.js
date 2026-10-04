@@ -71,8 +71,6 @@
     var snapshot = {};
     var compact = false;
     var open = false;
-    var pinned = false;
-    var hovering = false;
     var theme = 'auto';
     var panelId = 'cbu-source-' + (++nextId);
     var root = element(document, 'section', 'cbu-bar');
@@ -106,10 +104,12 @@
     info.setAttribute('aria-label', '查看数据来源与状态');
     info.setAttribute('aria-expanded', 'false');
     info.setAttribute('aria-controls', panelId);
+    info.title = '点击查看数据来源与状态';
     var toggle = element(document, 'button', 'cbu-toggle');
     toggle.type = 'button';
     toggle.setAttribute('aria-label', '收起用量条');
     toggle.setAttribute('aria-expanded', 'true');
+    toggle.title = '折叠额度条';
     toggle.innerHTML = '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 10 4-4 4 4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
     controls.append(info, toggle);
     row.append(pet, metrics, controls);
@@ -130,7 +130,8 @@
       fields[item[0]] = value;
     });
     panel.append(heading, list);
-    root.append(row, panel);
+    // Keep the controls nearest the composer when details grow upward.
+    root.append(panel, row);
 
     function listen(target, event, handler) {
       target.addEventListener(event, handler);
@@ -149,14 +150,11 @@
       info.setAttribute('aria-expanded', String(open));
       layoutChanged();
     }
-    function hasInfoFocus() {
+    function hasBarFocus() {
       // In the injected bar, document.activeElement is the shadow host.
       var scope = root.getRootNode();
       var focused = scope.activeElement || document.activeElement;
-      return focused === info || panel.contains(focused);
-    }
-    function dismissIfOutside() {
-      if (!pinned && !hovering && !hasInfoFocus()) setOpen(false);
+      return root.contains(focused);
     }
     function statusLabel(value) { return STATUS_LABELS[value] || '状态未知'; }
     function readWindow(key, now) {
@@ -267,26 +265,26 @@
         }, 650);
       });
       listen(toggle, 'click', function () {
+        setOpen(false);
         compact = !compact;
         root.dataset.mode = compact ? 'compact' : 'expanded';
         toggle.setAttribute('aria-label', compact ? '展开用量条' : '收起用量条');
         toggle.setAttribute('aria-expanded', String(!compact));
+        toggle.title = compact ? '展开额度条' : '折叠额度条';
         layoutChanged();
       });
-      listen(info, 'click', function () { pinned = !pinned; setOpen(pinned); });
-      listen(info, 'pointerenter', function () { hovering = true; setOpen(true); });
-      listen(info, 'pointerleave', function () { hovering = false; });
-      listen(panel, 'pointerenter', function () { hovering = true; });
-      listen(panel, 'pointerleave', function () { hovering = false; dismissIfOutside(); });
-      listen(root, 'pointerleave', function () { hovering = false; dismissIfOutside(); });
-      listen(info, 'focus', function () { setOpen(true); });
+      listen(info, 'click', function () { setOpen(!open); });
+      listen(document, 'pointerdown', function (event) {
+        var path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+        if (path.indexOf(root) === -1 && !root.contains(event.target)) setOpen(false);
+      });
       listen(root, 'focusout', function () {
         if (blurTimer !== null) view.clearTimeout(blurTimer);
-        blurTimer = view.setTimeout(function () { blurTimer = null; dismissIfOutside(); }, 0);
+        blurTimer = view.setTimeout(function () { blurTimer = null; if (!hasBarFocus()) setOpen(false); }, 0);
       });
       listen(root, 'keydown', function (event) {
         if (event.key === 'Escape' && open) {
-          pinned = false; hovering = false; info.focus();
+          info.focus();
           setOpen(false); event.stopPropagation();
         }
       });
@@ -297,7 +295,8 @@
       destroy();
       throw error;
     }
-    return { update: update, element: root, destroy: destroy, setTheme: setTheme };
+    return { update: update, element: root, destroy: destroy, setTheme: setTheme,
+      closeInfo: function () { var wasOpen = open; setOpen(false); return wasOpen; } };
   }
 
   global.CodexUsageBar = Object.freeze({ mount: mount });

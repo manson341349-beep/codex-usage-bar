@@ -1,6 +1,6 @@
 # codex-usage-bar
 
-Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.6.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+Codex 日常桌面实例的额度信息栏，带原创 SVG 角色 Milo。版本 **0.6.1，macOS**；统一仓库为未来 Windows 实现保留平台目录。
 
 > **在日常 Codex 的原生输入框上方显示额度，首页和会话页面都可使用。** 继续使用原有账号、历史、设置和项目；输入文字、输入法组合输入和进入会话不再主动卸载横条。它是原版 Codex 的启动伴侣，不修改官方应用安装包。
 >
@@ -38,7 +38,7 @@ open "$HOME/Applications/codex-usage-bar.app"
 - 经官方 CLI 的只读 `account/read` 和 `account/rateLimits/read` 获取订阅额度，约每 60 秒刷新。显示**已使用百分比**。
 - 5h 或每周窗口缺失、身份不明、数据过期或待重置时明确显示未知/状态；**缺数据不表示无限制**。没有账户绑定的“用户确认无限制”设置。
 - 会话缓存显示“当前来源未提供”；真实工作事件显示未接入。Milo 动画不表示模型正在生成。
-- hover、点击、键盘聚焦可查看来源说明。动画用 rAF 并尊重减少动态效果；不承诺 GPU 稳定 60 fps。
+- 箭头可折叠为单行额度摘要，再次点击展开；点击 `i` 查看来源说明，再次点击、点击外部或按 Esc 关闭。鼠标经过或键盘聚焦不再自动展开详情。动画用 rAF 并尊重减少动态效果；不承诺 GPU 稳定 60 fps。
 - 日常模式支持同一已验证实例中的多个 Codex 应用页面，并在页面重载或输入框被替换后重新挂载。仅支持默认资料路径；不主动切换会话、导航页面或发送消息。
 - 有兼容的原生输入框时才显示：登录、设置等没有输入框的页面，以及无法确认输入框位置或空间不足的布局会隐藏横条。DOM 是 Codex 内部接口，应用升级后可能需要适配。
 - 启动或连接失败会保留日常 Codex；如果它已经带调试参数打开，端口需随本人 Cmd-Q 关闭。不会为修复横条而强退应用。
@@ -78,7 +78,7 @@ python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
 node --test tests/test_frontend.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.6.0-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.6.1-source.zip
 ```
 
 构建只使用白名单源文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 是原创前端，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
