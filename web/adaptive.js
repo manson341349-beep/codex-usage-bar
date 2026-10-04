@@ -285,7 +285,8 @@
       }
       for (const node of [plan.editor, plan.shell].concat(ancestorChain(plan.root) || [])) {
         const style = window.getComputedStyle(node);
-        values.push(rect(node), style.display, style.position, style.overflowX,
+        values.push(node.getAttribute('class'), node.getAttribute('style'),
+          rect(node), style.display, style.position, style.overflowX,
           style.overflowY, style.transform, style.zoom, style.paddingLeft, style.paddingRight,
           style.fontFamily, style.fontSize, style.fontWeight, style.lineHeight);
       }

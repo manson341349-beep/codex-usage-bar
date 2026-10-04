@@ -754,8 +754,15 @@ test('unsafe own-slot probing removes its reservation and does not remount until
   assert.equal(instances.length,attempts+1,'theme change merits one new measurement');
   geometry.unsafe=false;geometry.bottom-=10;env.mutate();env.flush();
   assert.equal(api.inspect().status,'mounted');assert.ok(slot());api.dispose();assert.equal(slot(),null);
-  const fixed=roomFixture();fixed.geometry.fixedHeight=true;const fixedApi=fixed.env.install(false);
-  assert.equal(fixedApi.inspect().reason,'unsupported-room-reservation');assert.equal(fixed.slot(),null);fixedApi.dispose();
+  const fixed=roomFixture();fixed.geometry.fixedHeight=true;fixed.env.composer.setAttribute('style','height:44px');
+  const fixedApi=fixed.env.install(false);
+  assert.equal(fixedApi.inspect().reason,'unsupported-room-reservation');assert.equal(fixed.slot(),null);
+  const nativeBefore=fixed.env.composer.getBoundingClientRect();
+  fixed.geometry.fixedHeight=false;fixed.env.composer.removeAttribute('style');
+  assert.deepEqual(fixed.env.composer.getBoundingClientRect(),nativeBefore,'removing a height constraint can preserve current native geometry');
+  fixed.env.mutate();fixed.env.flush();
+  assert.equal(fixedApi.inspect().status,'mounted','native style change retries reservation with unchanged bounds');
+  fixedApi.dispose();
 });
 
 test('own-slot replacement and migration clean old companions and preserve native portal ownership', () => {
