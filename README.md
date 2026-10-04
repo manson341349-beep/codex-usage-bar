@@ -98,7 +98,7 @@ node scripts/build-sprig.mjs --check
 python3 scripts/validate.py
 python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
-node --test tests/test_frontend.js
+node --test tests/test_frontend.js tests/test_sprig_runtime.js
 python3 platforms/macos/build.py
 python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.8.0-source.zip
 ```

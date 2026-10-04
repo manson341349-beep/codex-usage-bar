@@ -3,6 +3,9 @@ import * as THREE from '../vendor/three.module.js';
 import {makeStage} from './character.js';
 import {PerformanceController} from './motion.js';
 
+// Only rig/contact inputs affect pixels; diagnostic pose metadata is excluded.
+const VISUAL_CHANNELS='x y sx sy sz rx ry rz headX headY headZ armL armR armLX armRX footL footR earL earR gazeX gazeY blink wink smile mouthOpen work spark'.split(' ');
+
 function mount(button,{root}={}) {
   if(!button||!root)throw new TypeError('Sprig requires its owned button and bar');
   const doc=button.ownerDocument,win=doc.defaultView;
@@ -14,7 +17,7 @@ function mount(button,{root}={}) {
   let reduced=media.matches,allowed=false,disposed=false,failed=false,focused=doc.hasFocus(),intersecting=true;
   let renderer=null,stage=null,camera=null,gl=null,ext=null,queries=[],pointerEvents=null,raf=0,last=0,running=false,themeDirty=true,pose=motion.update(0);
   let inits=0,frames=0,drawCalls=0,triangles=0,intervals=[],cpu=[],gpu=[],warmFrames=0;
-  let themeFingerprint='',mode='fallback',contextLost=false;
+  let themeFingerprint='',lastStaticFrame=null,mode='fallback',contextLost=false;
   const listen=(target,type,fn,options={})=>target.addEventListener(type,fn,{...options,signal:lifetime.signal});
   const sample=(arr,n)=>{arr.push(n);if(arr.length>600)arr.shift()};
   const pct=(arr,p)=>arr.length?+arr.slice().sort((a,b)=>a-b)[Math.floor((arr.length-1)*p)].toFixed(3):null;
@@ -23,7 +26,7 @@ function mount(button,{root}={}) {
     const rect=button.getBoundingClientRect(),style=win.getComputedStyle(button);
     return rect.width>0&&rect.height>0&&style.display!=='none'&&style.visibility==='visible';
   }
-  function pause(){running=false;if(raf)win.cancelAnimationFrame(raf);raf=0;last=0;pointerEvents?.abort();pointerEvents=null;motion.setPointer(0,0,false)}
+  function pause(){lastStaticFrame=null;running=false;if(raf)win.cancelAnimationFrame(raf);raf=0;last=0;pointerEvents?.abort();pointerEvents=null;motion.setPointer(0,0,false)}
   function release(){
     const gs=new Set(),ms=new Set(),ts=new Set();
     stage?.scene.traverse(o=>{if(o.geometry)gs.add(o.geometry);if(o.material)for(const m of Array.isArray(o.material)?o.material:[o.material])ms.add(m);o.shadow?.dispose()});
@@ -48,14 +51,14 @@ function mount(button,{root}={}) {
   function updateTheme(){
     if(!renderer||!stage)return;themeDirty=false;
     const css=win.getComputedStyle(root),surface=css.backgroundColor,accent=css.getPropertyValue('--cbu-accent').trim(),key=surface+'|'+accent;
-    if(key===themeFingerprint)return;themeFingerprint=key;
+    if(key===themeFingerprint)return;
     const parse=value=>{const probe=doc.createElement('span');probe.style.color=value;probe.style.display='none';root.append(probe);const c=win.getComputedStyle(probe).color;probe.remove();return new THREE.Color(c)};
     try{
       const bg=parse(surface),lightness=bg.r*.2126+bg.g*.7152+bg.b*.0722;
       renderer.toneMappingExposure=lightness<.16?1.02:1.14;
       // Keep the approved mint identity; a restrained accent tint follows custom themes.
       const tint=parse(accent||'#8bbdab');tint.lerp(new THREE.Color(0x68ad92),.82);
-      stage.model.materials.mint.color.copy(tint);
+      stage.model.materials.mint.color.copy(tint);themeFingerprint=key;
     }catch(_){/* Invalid host custom properties cannot break quota or the character. */}
   }
   function readGPU(){if(!ext)return;while(queries.length){const q=queries[0];if(!gl.getQueryParameter(q,gl.QUERY_RESULT_AVAILABLE))break;if(!gl.getParameter(ext.GPU_DISJOINT_EXT)&&warmFrames>15)sample(gpu,gl.getQueryParameter(q,gl.QUERY_RESULT)/1e6);gl.deleteQuery(q);queries.shift()}}
@@ -63,10 +66,15 @@ function mount(button,{root}={}) {
     if(!renderer||!canRender())return;
     try{
       const start=performance.now();if(themeDirty)updateTheme();
-      const ratio=Math.min(win.devicePixelRatio||1,2);if(renderer.getPixelRatio()!==ratio){renderer.setPixelRatio(ratio);renderer.setSize(56,56,false)}
+      const ratio=Math.min(win.devicePixelRatio||1,2);
+      // Host geometry probes, quota heartbeats and unrelated DOM mutations can
+      // all ask for a refresh. Reduced mode draws only a changed visual state.
+      const staticFrame=reduced?JSON.stringify([themeFingerprint,ratio,...VISUAL_CHANNELS.map(key=>pose[key])]):null;
+      if(reduced&&staticFrame===lastStaticFrame)return;
+      if(renderer.getPixelRatio()!==ratio){renderer.setPixelRatio(ratio);renderer.setSize(56,56,false)}
       stage.model.apply(pose);stage.contact.position.x=pose.x;stage.contact.material.opacity=Math.max(.2,1-pose.y*.9);stage.contact.scale.setScalar(1+pose.y*.65);
       readGPU();let q=null;if(ext&&queries.length<5){q=gl.createQuery();gl.beginQuery(ext.TIME_ELAPSED_EXT,q)}
-      renderer.render(stage.scene,camera);if(q){gl.endQuery(ext.TIME_ELAPSED_EXT);queries.push(q)}
+      renderer.render(stage.scene,camera);lastStaticFrame=staticFrame;if(q){gl.endQuery(ext.TIME_ELAPSED_EXT);queries.push(q)}
       frames++;warmFrames++;drawCalls=renderer.info.render.calls;triangles=renderer.info.render.triangles;if(warmFrames>15)sample(cpu,performance.now()-start);
       canvas.style.display='block';if(fallback)fallback.style.display='none';
     }catch(_){fail()}

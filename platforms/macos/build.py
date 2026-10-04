@@ -37,7 +37,7 @@ SOURCE_EXTRA_FILES = (
     '.gitignore', 'web/preview.html', 'platforms/macos/test_packaging.py',
     'tests/test_cdp.py', 'tests/test_host.py', 'tests/test_daily_host.py',
     'tests/test_manager.py', 'tests/test_quota.py',
-    'tests/test_frontend.js',
+    'tests/test_frontend.js', 'tests/test_sprig_runtime.js',
     'platforms/windows/README.md', '.github/workflows/ci.yml', 'scripts/validate.py',
     'web/sprig-source/runtime.js', 'web/sprig-source/character.js',
     'web/sprig-source/motion.js', 'web/vendor/three.module.js',

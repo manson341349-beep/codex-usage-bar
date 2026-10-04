@@ -244,6 +244,7 @@ class PackagingTests(unittest.TestCase):
             expected = {prefix + name for name in (*build.PAYLOAD_FILES, *build.SOURCE_EXTRA_FILES)}
             expected.add(prefix + 'source-manifest.json')
             self.assertEqual(set(archive.namelist()), expected)
+            self.assertIn(prefix + 'tests/test_sprig_runtime.js', archive.namelist())
             for name in archive.namelist():
                 self.assertNotIn(b'PRIVATE SENTINEL', archive.read(name))
                 self.assertNotIn(str(self.root).encode(), archive.read(name))
