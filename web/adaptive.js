@@ -619,7 +619,10 @@
         ownedSlot = document.createElement('div');
         knownHosts.add(ownedSlot);
         ownedSlot.setAttribute('data-codex-usage-bar-slot', '');
+        // Global reduced-motion rules can still create sub-millisecond transitions.
+        // Geometry probes must settle synchronously on our own containers.
         ownedSlot.style.cssText = 'display:block!important;position:relative!important;box-sizing:border-box!important;' +
+          'transition:none!important;animation:none!important;' +
           'width:100%!important;min-width:0!important;height:auto!important;margin:0!important;padding:0!important;border:0!important;';
         next.root.insertBefore(ownedSlot, next.shell);
         target.portal = ownedSlot;
@@ -628,6 +631,7 @@
       knownHosts.add(host);
       host.setAttribute('data-codex-usage-bar', '');
       host.style.cssText = 'display:block!important;visibility:hidden!important;position:relative!important;' +
+        'transition:none!important;animation:none!important;' +
         'box-sizing:border-box!important;width:100%!important;max-width:none!important;min-width:0!important;left:0!important;right:auto!important;' +
         'height:auto!important;margin:0 0 10px!important;padding:0!important;border:0!important;' +
         'flex:none!important;float:none!important;transform:none!important;' +
