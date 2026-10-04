@@ -215,6 +215,30 @@ test('quota rendering preserves zero, unknown 5h and unknown cache without using
   bar.destroy(); assert.equal(env.timers.size, 0);
 });
 
+test('weekly balance converts valid used quota and preserves unknown states', () => {
+  const env = environment({ adapter: false }), bar = mountBar(env);
+  for (const [used, remaining] of [[0, 100], [45, 55], [100, 0]]) {
+    const input = snapshot(env); input.limits.secondary.usedPercent = used; bar.update(input);
+    const weekly = cell(bar.element, 'secondary');
+    assert.equal(label(bar.element, 'secondary'), remaining + '%');
+    assert.equal(weekly.querySelector('.cbu-fill').style.width, remaining + '%');
+    assert.match(weekly.getAttribute('aria-label'), /^每周订阅剩余，/);
+    assert.equal(weekly.querySelector('.cbu-compact-label').textContent, '周余');
+    assert.equal(label(bar.element, 'primary'), '12%');
+  }
+  for (const value of [-1, 101, NaN, Infinity, '42', true, null]) {
+    const input = snapshot(env); input.limits.secondary.usedPercent = value; bar.update(input);
+    assert.equal(label(bar.element, 'secondary'), '—');
+  }
+  const missing = snapshot(env); delete missing.limits.secondary; bar.update(missing);
+  assert.equal(label(bar.element, 'secondary'), '—');
+  bar.update(snapshot(env, { status: 'account_changed', stale: true }));
+  assert.equal(label(bar.element, 'secondary'), '—');
+  const expired = snapshot(env); expired.limits.secondary.resetsAt = env.now() / 1000 - 1; bar.update(expired);
+  assert.equal(label(bar.element, 'secondary'), '—');
+  bar.destroy();
+});
+
 test('malformed quota numbers and wrong windows never render as valid usage', () => {
   const env = environment({ adapter: false }), bar = mountBar(env);
   for (const value of [-1, 101, NaN, Infinity, '42', true, null]) {
@@ -309,7 +333,7 @@ test('collapse closes details, updates disclosure labels, and preserves state ac
   assert.equal(toggle.getAttribute('aria-expanded'), 'false');
   assert.equal(toggle.getAttribute('aria-label'), '展开用量条');
   bar.update(snapshot(env)); assert.equal(root.dataset.mode, 'compact');
-  assert.equal(label(root, 'secondary'), '45%'); assert.equal(label(root, 'primary'), '12%');
+  assert.equal(label(root, 'secondary'), '55%'); assert.equal(label(root, 'primary'), '12%');
   info.dispatchEvent({ type: 'click' }); assert.equal(panel.hidden, false);
   toggle.dispatchEvent({ type: 'click' });
   assert.equal(root.dataset.mode, 'expanded'); assert.equal(panel.hidden, true);

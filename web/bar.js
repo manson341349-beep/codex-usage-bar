@@ -86,12 +86,12 @@
     pet.innerHTML = robot;
     var metrics = element(document, 'div', 'cbu-metrics');
     var cells = {};
-    [['secondary', '每周订阅已用'], ['primary', '5 小时已用'], ['cache', '缓存命中']].forEach(function (item) {
+    [['secondary', '每周订阅剩余'], ['primary', '5 小时已用'], ['cache', '缓存命中']].forEach(function (item) {
       var metric = element(document, 'div', 'cbu-metric');
       metric.dataset.metric = item[0];
       var label = element(document, 'div', 'cbu-label', item[1]);
       var shortLabel = element(document, 'span', 'cbu-compact-label',
-        { secondary: '周', primary: '5h', cache: '缓存' }[item[0]]);
+        { secondary: '周余', primary: '5h', cache: '缓存' }[item[0]]);
       var value = element(document, 'div', 'cbu-value', '—');
       var detail = element(document, 'div', 'cbu-detail', '当前来源未提供');
       var track = element(document, 'div', 'cbu-track');
@@ -184,7 +184,7 @@
         return { available: false, detail: '用量数据不可用' };
       }
       stale = stale || window.status === 'stale';
-      return { available: true, value: window.usedPercent, reset: reset, stale: stale,
+      return { available: true, value: key === 'secondary' ? 100 - window.usedPercent : window.usedPercent, reset: reset, stale: stale,
         detail: (stale ? '旧数据 · ' : '') + resetText(reset, now) };
     }
     function readCache() {
@@ -229,7 +229,7 @@
       var date = typeof snapshot.updatedAt === 'string' && snapshot.updatedAt.trim() ? new Date(snapshot.updatedAt) : null;
       fields.updated.textContent = date && Number.isFinite(date.getTime()) ?
         date.toLocaleString('zh-CN', { hour12: false }) : '更新时间未提供';
-      fields.quota.textContent = statusLabel(snapshot.status) + '。每周：' + (weekly.available ? (weekly.stale ? '旧数据' : '可用') : weekly.detail) +
+      fields.quota.textContent = statusLabel(snapshot.status) + '。每周剩余 = 100% − 已用比例。每周：' + (weekly.available ? (weekly.stale ? '旧数据' : '可用') : weekly.detail) +
         '；5 小时：' + (primary.available ? (primary.stale ? '旧数据' : '可用') : primary.detail);
       fields.cache.textContent = cache.detail + '。来源：Codex 当前会话统计；命中率 = 累计缓存输入 ÷ 累计输入。' +
         (cache.available && snapshot.cache.observedAt ? '收到时间：' +
