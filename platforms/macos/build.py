@@ -31,7 +31,7 @@ PAYLOAD_FILES = (
     'platforms/macos/Launcher.swift', 'platforms/macos/Start.command',
     'platforms/macos/Test.command', 'platforms/macos/install.py',
     'platforms/macos/build.py', 'README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
-    'docs/VALIDATION.md',
+    'docs/VALIDATION.md', 'docs/assets/overview.svg',
 )
 SOURCE_EXTRA_FILES = (
     '.gitignore', 'web/preview.html', 'platforms/macos/test_packaging.py',
