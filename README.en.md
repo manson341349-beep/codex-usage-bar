@@ -6,6 +6,14 @@
 
 A usage bar for your everyday Codex desktop instance, with Sprig, an original 3D companion styled as a soft vinyl toy. Version **0.9.0 for macOS**. This shared repository reserves platform directories for a future Windows implementation.
 
+**Meet Sprig in 24 seconds** · 1080 × 1350, 60 fps, with an original score. Click the poster to open the video file on GitHub.
+
+<a href="https://github.com/manson341349-beep/codex-usage-bar/blob/main/docs/assets/sprig-product-film.mp4"><img src="docs/assets/sprig-product-film-poster.png" width="340" alt="Watch the 24-second Sprig product film: an original 3D companion, usage limits, folding, and language and theme changes."></a>
+
+[Watch the film](https://github.com/manson341349-beep/codex-usage-bar/blob/main/docs/assets/sprig-product-film.mp4) · [Download MP4](https://raw.githubusercontent.com/manson341349-beep/codex-usage-bar/main/docs/assets/sprig-product-film.mp4) · [Edit and rebuild the animation](promos/sprig-remotion/README.en.md)
+
+The film uses example usage values and offline rendering. Its frame rate is not a plugin performance measurement, and the character's performance does not indicate real Codex work activity.
+
 **Language:** The bar follows Codex's app language in real time: Chinese language variants use Simplified Chinese, and all other languages use English. The menu bar follows on its next status refresh; before connecting to Codex, it uses the system language to choose English or Chinese. Language changes preserve quota data, cache statistics, and the current expanded or collapsed state. GitHub READMEs do not switch automatically with the app; use the links above to choose a documentation language.
 
 > **See your usage limits just above Codex's native composer, on both the home screen and conversation pages.** Keep your existing account, history, settings, and projects. Typing, using an input method, or entering a conversation no longer causes the bar to unmount. This is a launcher companion for the original Codex app; it does not modify the official application bundle.

@@ -3,6 +3,20 @@ on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
 jobs:
+  remotion:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: promos/sprig-remotion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: node --check scripts/render.mjs
+      - run: node --check scripts/rebuild-sprig.mjs
   verify:
     runs-on: macos-latest
     steps:

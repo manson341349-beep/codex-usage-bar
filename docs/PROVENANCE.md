@@ -10,6 +10,14 @@
 
 `scripts/build-sprig.mjs` 使用锁定的开发依赖 esbuild 0.25.11 从本地模块生成单一 IIFE bundle。`npm ci --ignore-scripts` 安装构建依赖，`node scripts/build-sprig.mjs --check` 重建并比对提交文件。开发依赖不进入应用运行包；运行时无需 Node.js、npm、CDN 或在线模型服务。固定资源清单与 SHA-256 校验用于确认实际注入的是随版本发布的文件，不从外部获取脚本。
 
+## Remotion 产品短片
+
+[24 秒原成片](assets/sprig-product-film.mp4)及海报来自本项目创作的分镜、画面和 Sprig 表演。[独立动画工程](../promos/sprig-remotion/README.md)保留可编辑时间线、角色模型与动作、原始配乐及锁定依赖；省去的 420 张角色 PNG 可用随工程提供的源码在本机重建。影片采用 1080 × 1350、60 fps 离线渲染，该帧率不是插件实时性能验收结果，角色表演也不是 Codex 工作事件记录。
+
+`promos/sprig-remotion/public/ui/` 是真实插件组件在隔离样例中生成的中英、明暗、展开与折叠截图，额度值为人工示例，不含真实账户或聊天资料；输入框外壳与切换控件为影片中的演示画面。原创合成音轨 `public/audio/sprig-score.wav` 由振荡器与固定种子噪声生成，无外部音乐采样或人声录音，以 **CC0-1.0** 提供。自有动画代码、影片画面、角色与样例截图适用本项目 MIT 许可。
+
+动画工程的 **Remotion 4.0.532** 使用其[上游 Remotion 许可](https://github.com/remotion-dev/remotion/blob/v4.0.532/LICENSE.md)，不属于根目录 MIT 对自有代码的授权。其余 npm/Python 依赖遵循各自许可；Three.js 的完整 MIT 通知随 `asset-source/web/vendor/` 保留。工程不分发 Chrome、系统字体或已安装的动画开发工具，也不要求日常插件安装这些独立动画依赖。macOS 已完成重建与导出验证，其他环境可能因字体、浏览器或 GPU 驱动产生差异。
+
 ## 自有许可与外部软件
 
 早期私人原型曾参考用户提供的软件。本公开版本不包含该软件的可执行文件、提取或反编译材料、原前端、修改版前端或图形资源。原软件附带的第三方通知没有被视为其整体代码的开源授权。

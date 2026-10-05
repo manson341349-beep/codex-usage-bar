@@ -6,6 +6,14 @@
 
 Codex 日常桌面实例的额度信息栏，带原创软胶风格 3D 角色芽团 Sprig。版本 **0.9.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
 
+**24 秒认识 Sprig** · 1080 × 1350，60 fps，原创配乐。点击海报打开 GitHub 视频文件页。
+
+<a href="https://github.com/manson341349-beep/codex-usage-bar/blob/main/docs/assets/sprig-product-film.mp4"><img src="docs/assets/sprig-product-film-poster.png" width="340" alt="观看 24 秒 Sprig 产品短片：原创 3D 伙伴、额度栏、折叠与中英主题切换。"></a>
+
+[观看视频](https://github.com/manson341349-beep/codex-usage-bar/blob/main/docs/assets/sprig-product-film.mp4) · [下载 MP4](https://raw.githubusercontent.com/manson341349-beep/codex-usage-bar/main/docs/assets/sprig-product-film.mp4) · [编辑与重建动画](promos/sprig-remotion/README.md)
+
+短片使用示例额度与离线渲染，画面帧率不代表插件实时性能，角色表演不表示真实 Codex 工作状态。
+
 **语言：** 横条实时跟随 Codex 的 App 语言设置：中文语系显示简体中文，其余语言显示 English。菜单栏在下一次状态刷新时同步；尚未连接 Codex 时，先按系统语言选择中英文。切换语言保留当前额度、缓存与展开状态。GitHub README 不会跟随 App 语言自动切换，请使用顶部链接手动选择文档语言。
 
 > **在日常 Codex 的原生输入框上方显示额度，首页和会话页面都可使用。** 继续使用原有账号、历史、设置和项目；输入文字、输入法组合输入和进入会话不再主动卸载横条。它是原版 Codex 的启动伴侣，不修改官方应用安装包。

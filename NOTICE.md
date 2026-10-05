@@ -10,6 +10,12 @@ The source distribution contains the upstream modules `web/vendor/three.module.j
 
 **esbuild 0.25.11** is a locked development dependency used to reproduce the bundle. It is not included as an executable or runtime dependency in the installed application. Its package retains its own upstream license when obtained through npm.
 
+## Product film and editable animation project
+
+The original [24-second product film](docs/assets/sprig-product-film.mp4), its poster, project-authored animation source in [promos/sprig-remotion](promos/sprig-remotion/README.en.md), Sprig character assets, and component fixture screenshots are project-authored visual materials under the root MIT license. The screenshots use the actual usage-bar component with synthetic example values; they do not contain real account usage or conversation content. The original synthesized soundtrack in `promos/sprig-remotion/public/audio/sprig-score.wav` is provided under **CC0-1.0** and contains no external music samples or recorded voices.
+
+The animation project has its own dependency lockfile. **Remotion 4.0.532** is governed by the [upstream Remotion License](https://github.com/remotion-dev/remotion/blob/v4.0.532/LICENSE.md), not this project's MIT license. React, Playwright, Pillow, and other animation dependencies retain their respective upstream terms. The local Three.js copy retains [its own MIT notice](promos/sprig-remotion/asset-source/web/vendor/THREE-LICENSE.txt). Animation tools are separate from the installed usage-bar runtime; adding the film does not relicense those tools or the external browser and system fonts used to render it.
+
 ## External applications and references
 
 Codex and OpenAI are names of their respective owners. This independent project is not affiliated with or endorsed by OpenAI. The separately installed Codex application and CLI, Python runtime, and macOS system tools are not bundled or relicensed by this project.

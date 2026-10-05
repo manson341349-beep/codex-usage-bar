@@ -1,0 +1,28 @@
+{
+  "name": "codex-usage-bar-remotion-film",
+  "version": "1.0.0",
+  "private": true,
+  "description": "An original Remotion product film for codex-usage-bar and Sprig.",
+  "scripts": {
+    "studio": "remotion studio src/index.tsx",
+    "render": "node scripts/render.mjs",
+    "stills": "node scripts/render.mjs --stills",
+    "check": "tsc --noEmit",
+    "assets": "node scripts/rebuild-sprig.mjs",
+    "prestudio": "npm run assets",
+    "prerender": "npm run assets",
+    "prestills": "npm run assets"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.532",
+    "@remotion/cli": "4.0.532",
+    "@remotion/renderer": "4.0.532",
+    "@types/react": "19.2.0",
+    "@types/react-dom": "19.2.0",
+    "playwright-core": "1.56.1",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.532",
+    "typescript": "5.9.3"
+  }
+}
