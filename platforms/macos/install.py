@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import ctypes
 from datetime import datetime, timezone
 import fcntl
 import json
@@ -24,6 +25,18 @@ from build import (BUNDLE_ID, MARKER, MARKER_NAME, PRODUCT, SOURCE_ROOT,
 
 class InstallError(RuntimeError):
     pass
+
+
+def exchange_apps(first: Path, second: Path) -> None:
+    """Atomically exchange two validated app directories on the same filesystem."""
+    if sys.platform != 'darwin':
+        raise InstallError('atomic_app_exchange_requires_macos')
+    libc = ctypes.CDLL(None, use_errno=True)
+    exchange = libc.renamex_np
+    exchange.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+    exchange.restype = ctypes.c_int
+    if exchange(os.fsencode(first), os.fsencode(second), 2) != 0:  # RENAME_SWAP
+        raise InstallError('atomic_app_exchange_failed')
 
 
 def user_home() -> Path:
@@ -204,12 +217,15 @@ class Installer:
         stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
         return self.backups / f'{PRODUCT}-{purpose}-{stamp}-{uuid.uuid4().hex[:8]}.app'
 
-    def install(self, *, reuse_approved_profile=False) -> dict:
+    def install(self, *, reuse_approved_profile=False, replace_existing=False) -> dict:
         reject_symlink_components(self.app)
         current_receipt = self.existing_receipt()
         previous = current_receipt or self.archived_receipt()
+        original_identity = None
         if self.app.exists():
             verify_owned_app(self.app)
+            info = self.app.lstat()
+            original_identity = (info.st_dev, info.st_ino)
             if current_receipt is None:
                 raise InstallError('existing_app_has_no_owned_receipt')
         if self.support.exists() and previous is None:
@@ -218,7 +234,14 @@ class Installer:
             if {item.name for item in self.support.iterdir()} - {'manager.lock'}:
                 raise InstallError('unrecognized_existing_support_directory')
         reuse = reuse_approved_profile or bool(previous and previous['profileBinding'] == 'approved_previous')
-        receipt = self.receipt_factory(reuse)
+        if previous and previous['profileBinding'] == 'approved_previous':
+            # Source checkouts can move. The already-approved isolated test
+            # profile stays bound to its original manifest, without copying it
+            # or looking for another account next to the new checkout.
+            receipt = dict(previous)
+        else:
+            receipt = self.receipt_factory(reuse)
+        receipt['buildSourceRoot'] = str(self.source)
         self.validate_receipt(receipt)
         self.prepare_directories()
         with self.lifecycle_lock():
@@ -231,26 +254,66 @@ class Installer:
             staged_app = staging / (PRODUCT + '.app')
             backup = None
             promoted = False
+            exchanged = False
+            committed = False
+            cleanup_warning = None
             try:
                 build_app(staged_app, _source_root=self.source)
                 verify_owned_app(staged_app)
+                # Compilation can take time. Do not exchange or remove an app
+                # that appeared/changed ownership while the compiler was busy.
+                if self.existing_receipt() != current_receipt:
+                    raise InstallError('installation_changed_retry')
+                reject_symlink_components(self.app)
+                identity = None
                 if self.app.exists():
-                    backup = self.backup_destination('backup')
-                    self.app.rename(backup)
-                staged_app.rename(self.app)
+                    verify_owned_app(self.app)
+                    info = self.app.lstat()
+                    identity = (info.st_dev, info.st_ino)
+                if identity != original_identity:
+                    raise InstallError('installation_changed_retry')
+                if self.app.exists():
+                    if replace_existing:
+                        # Keep the old directory only inside this install transaction,
+                        # so rollback stays atomic without retaining another app copy.
+                        exchange_apps(staged_app, self.app)
+                        exchanged = True
+                    else:
+                        backup = self.backup_destination('backup')
+                        self.app.rename(backup)
+                if not exchanged:
+                    staged_app.rename(self.app)
                 promoted = True
                 write_private_json(self.receipt_path, receipt)
+                committed = True
             except BaseException:
-                if promoted:
+                if exchanged:
+                    try:
+                        exchange_apps(staged_app, self.app)
+                    except BaseException:
+                        # Do not erase the former app if rollback itself fails.
+                        staging = None
+                        raise InstallError('atomic_app_rollback_failed') from None
+                elif promoted:
                     # Only this call's freshly generated app is removed on rollback.
                     shutil.rmtree(self.app)
                 if backup is not None and backup.exists():
                     backup.rename(self.app)
                 raise
             finally:
-                shutil.rmtree(staging)
-        return {'appPath': str(self.app), 'receiptPath': str(self.receipt_path),
-                'backupPath': str(backup) if backup else None, 'profileBinding': receipt['profileBinding']}
+                if staging is not None:
+                    try:
+                        shutil.rmtree(staging)
+                    except OSError:
+                        if not committed:
+                            raise InstallError('installation_failed_cleanup_incomplete') from None
+                        cleanup_warning = {'code': 'installed_cleanup_incomplete',
+                                           'retainedStagingPath': str(staging)}
+        result = {'appPath': str(self.app), 'receiptPath': str(self.receipt_path),
+                  'backupPath': str(backup) if backup else None, 'profileBinding': receipt['profileBinding']}
+        if cleanup_warning:
+            result['cleanupWarning'] = cleanup_warning
+        return result
 
     def uninstall(self) -> dict:
         receipt = self.existing_receipt()
@@ -278,15 +341,20 @@ def main(argv=None) -> int:
                         help='keep the validated predecessor profile for optional Test.command mode only')
     parser.add_argument('--uninstall', action='store_true',
                         help='remove only this receipted app; retain backup, state and login profiles')
+    parser.add_argument('--replace-existing', action='store_true',
+                        help='atomically upgrade the owned app without retaining a backup copy')
     args = parser.parse_args(argv)
     if args.uninstall and args.use_approved_project_profile:
         parser.error('profile selection is only available during installation')
+    if args.uninstall and args.replace_existing:
+        parser.error('--replace-existing is only available during installation')
     if sys.platform != 'darwin' or sys.version_info < (3, 12):
         parser.error('macOS with an existing Python 3.12 or later is required')
     try:
         installer = Installer()
         result = installer.uninstall() if args.uninstall else installer.install(
-            reuse_approved_profile=args.use_approved_project_profile)
+            reuse_approved_profile=args.use_approved_project_profile,
+            replace_existing=args.replace_existing)
     except Exception as exc:
         # Do not leak raw process output, credentials, or unexpected exception payloads.
         from_errors = (InstallError, PackageError)

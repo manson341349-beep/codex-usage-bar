@@ -21,7 +21,7 @@ struct LauncherCopy: Equatable {
     let detail: String
 }
 
-enum LauncherFailure: Equatable, CaseIterable {
+enum LauncherFailure: Error, Equatable, CaseIterable {
     case pythonMissing, alreadyRunning, resourcesMissing, launchFailed
     case cleanupUnverified, managerFailed
 
@@ -53,6 +53,7 @@ enum LauncherStatus: Equatable {
     case starting, waitingForCodex, attaching, waitingForComposer
     case visible(Int, Int), detached, codexExited, cancelled, stopped
     case stopping, stopFailed, waitingForCleanup
+    case residentWaiting, needsLauncher, quotaRetrying, recovering(Int, LauncherFailure?)
     case failure(LauncherFailure, retry: Bool)
 
     func copy(in locale: LauncherLocale) -> LauncherCopy {
@@ -60,6 +61,19 @@ enum LauncherStatus: Equatable {
         case .starting:
             return LauncherCopy(title: locale.text("正在启动额度条…", "Starting usage bar…"),
                 detail: locale.text("后台运行，不需要终端窗口", "Runs in the background; no terminal needed"))
+        case .residentWaiting:
+            return LauncherCopy(title: locale.text("常驻运行，等待 Codex…", "Resident mode: waiting for Codex…"),
+                detail: locale.text("Codex 未打开；选择“打开 Codex”即可使用", "Codex is closed; choose Open Codex when you need it"))
+        case .needsLauncher:
+            return LauncherCopy(title: locale.text("当前 Codex 尚未启用额度条", "This Codex session has no usage bar connection"),
+                detail: locale.text("正常退出 Codex 后，从这里选择“打开 Codex”", "Quit Codex normally, then choose Open Codex here"))
+        case .quotaRetrying:
+            return LauncherCopy(title: locale.text("额度数据恢复中…", "Recovering usage data…"),
+                detail: locale.text("后台会自动重试，暂未取得最新额度", "Retrying in the background; current usage is not yet available"))
+        case let .recovering(seconds, error):
+            let reason = error.map { $0.copy(in: locale).title + " · " } ?? ""
+            return LauncherCopy(title: locale.text("额度条恢复中…", "Recovering usage bar…"),
+                detail: reason + locale.text("约 \(seconds) 秒后自动重试", "Retrying in about \(seconds) seconds"))
         case .waitingForCodex:
             return LauncherCopy(title: locale.text("等待 Codex 正常退出", "Waiting for Codex to quit normally"),
                 detail: locale.text("保存工作后按 ⌘Q；将自动重新打开", "Save your work and press ⌘Q; Codex will reopen automatically"))
@@ -129,7 +143,7 @@ struct LauncherMenuCopy: Equatable {
     init(locale: LauncherLocale) {
         statusBar = locale.text("额度", "Usage")
         accessibility = locale.text("Codex 额度条", "Codex Usage Bar")
-        show = locale.text("显示 Codex", "Show Codex")
+        show = locale.text("打开 Codex", "Open Codex")
         start = locale.text("启动额度条", "Start Usage Bar")
         stop = locale.text("停止额度条", "Stop Usage Bar")
         quit = locale.text("退出额度条", "Quit Usage Bar")
@@ -156,6 +170,7 @@ struct LauncherPresentation {
 
 enum ManagerMessage: Equatable {
     case waitingForCodex, attaching, waitingForComposer
+    case residentWaiting, needsLauncher, quotaRetrying
     case visible(Int, Int), detached, codexExited, cancelled
     case failure(LauncherFailure)
     case locale(LauncherLocale)
@@ -163,6 +178,14 @@ enum ManagerMessage: Equatable {
     // Only recognized, non-private manager messages enter the UI. Raw output is
     // neither displayed nor written to disk. Unknown lines are discarded.
     static func parse(_ line: String) -> ManagerMessage? {
+        switch line {
+        case "codex-usage-bar-resident:waiting": return .residentWaiting
+        case "codex-usage-bar-resident:waiting-for-quit": return .waitingForCodex
+        case "codex-usage-bar-resident:attached": return .attaching
+        case "codex-usage-bar-resident:needs-launcher": return .needsLauncher
+        case "codex-usage-bar-resident:quota-retrying": return .quotaRetrying
+        default: break
+        }
         if line == "codex-usage-bar-locale:zh-CN" { return .locale(.chinese) }
         if line == "codex-usage-bar-locale:en" { return .locale(.english) }
         if line == "Python 3.12 or later is required. No interpreter has been installed or changed." {
@@ -202,6 +225,23 @@ enum ManagerMessage: Equatable {
               let visible = Int(line[visibleRange]), let waiting = Int(line[waitingRange]),
               visible > 0, visible <= 512, waiting <= 512 else { return nil }
         return .visible(visible, waiting)
+    }
+
+    var status: LauncherStatus? {
+        switch self {
+        case .residentWaiting: return .residentWaiting
+        case .needsLauncher: return .needsLauncher
+        case .quotaRetrying: return .quotaRetrying
+        case .waitingForCodex: return .waitingForCodex
+        case .attaching: return .attaching
+        case .waitingForComposer: return .waitingForComposer
+        case let .visible(count, waiting): return .visible(count, waiting)
+        case .detached: return .detached
+        case .codexExited: return .codexExited
+        case .cancelled: return .cancelled
+        case let .failure(error): return .failure(error, retry: false)
+        case .locale: return nil
+        }
     }
 }
 
@@ -248,6 +288,226 @@ func signalManagerStop(_ process: Process) -> Bool {
     return Darwin.kill(process.processIdentifier, SIGTERM) == 0 || errno == ESRCH
 }
 
+func isResidentLaunch(_ arguments: [String]) -> Bool {
+    arguments.contains("--resident")
+}
+
+func managerArguments(launchOnce: Bool) -> [String] {
+    var arguments = ["--resident"]
+    if launchOnce { arguments.append("--launch-once") }
+    arguments += ["--supervisor-pid", String(ProcessInfo.processInfo.processIdentifier)]
+    return arguments
+}
+
+// Own only the direct manager child. The same pipe/termination/timer wiring is
+// exercised by offline tests with dummy processes; no saved PID is ever trusted.
+final class ResidentManagerSupervisor {
+    private(set) var child: Process?
+    private(set) var isEnabled = false
+    private(set) var retryPending = false
+    private(set) var stopRequested = false
+    private var outputPipe: Pipe?
+    private var output = ManagerOutput()
+    private var outputEnded = false
+    private var exitObserved = false
+    private var failure: LauncherFailure?
+    private var retryTimer: Timer?
+    private var pendingLaunchOnce = false
+    private var retryCount = 0
+    private var startedAt: Date?
+    private let makeProcess: (Bool) throws -> Process
+    private let timerScale: TimeInterval
+    private let stableInterval: TimeInterval
+    var onMessage: ((ManagerMessage) -> Void)?
+    var onStarted: (() -> Void)?
+    var onRetry: ((Int) -> Void)?
+    var onFinished: ((LauncherFailure?, Bool) -> Void)?
+    var onChange: (() -> Void)?
+
+    init(timerScale: TimeInterval = 1, stableInterval: TimeInterval = 60,
+         makeProcess: @escaping (Bool) throws -> Process) {
+        self.makeProcess = makeProcess
+        self.timerScale = timerScale
+        self.stableInterval = stableInterval
+    }
+
+    static func retryDelay(_ attempt: Int) -> Int {
+        [5, 10, 20, 40, 60][min(max(attempt, 0), 4)]
+    }
+
+    func start(launchOnce: Bool = false) {
+        guard child == nil else { return }
+        cancelRetry()
+        pendingLaunchOnce = false
+        retryCount = 0
+        isEnabled = true
+        launch(launchOnce: launchOnce)
+    }
+
+    // Menu and app re-open share this path. Activating an existing Codex never
+    // grants permission to open another one. A cold open replaces only our own
+    // observer after its safe shutdown; Stop/Quit cancels a queued open.
+    @discardableResult
+    func openCodex(activateExisting: () -> Bool) -> Bool {
+        if activateExisting() {
+            if child == nil { start() }
+            return true
+        }
+        guard child != nil else {
+            start(launchOnce: true)
+            return true
+        }
+        guard stop() else { return false }
+        pendingLaunchOnce = true
+        return true
+    }
+
+    private func launch(launchOnce: Bool = false) {
+        guard isEnabled, child == nil else { return }
+        failure = nil
+        stopRequested = false
+        outputEnded = false
+        exitObserved = false
+        output = ManagerOutput()
+        let process: Process
+        do { process = try makeProcess(launchOnce) }
+        catch {
+            onFinished?(error as? LauncherFailure ?? .launchFailed, false)
+            scheduleRetry()
+            return
+        }
+        let pipe = Pipe()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = pipe
+        process.standardError = pipe
+        child = process
+        outputPipe = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
+            let data = availableManagerOutput(handle)
+            DispatchQueue.main.async { [weak self, weak process] in
+                guard let self, let process, self.child === process else { return }
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                    self.outputEnded = true
+                    self.consume(self.output.finish())
+                    self.finishIfReady(process)
+                } else {
+                    self.consume(self.output.accept(data))
+                }
+            }
+        }
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.child === process else { return }
+                self.exitObserved = true
+                self.finishIfReady(process)
+                // Bound drainage if a faulty descendant retains stdout.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                    guard let self, self.child === process, self.exitObserved,
+                          !self.outputEnded else { return }
+                    self.outputEnded = true
+                    self.failure = self.failure ?? .cleanupUnverified
+                    self.consume(self.output.finish())
+                    self.finishIfReady(process)
+                }
+            }
+        }
+        onStarted?()
+        do {
+            try process.run()
+            startedAt = Date()
+            try? pipe.fileHandleForWriting.close()
+            onChange?()
+        } catch {
+            process.terminationHandler = nil
+            closePipe()
+            child = nil
+            onFinished?(.launchFailed, false)
+            scheduleRetry()
+        }
+    }
+
+    private func consume(_ messages: [ManagerMessage]) {
+        for message in messages {
+            if case let .failure(error) = message { failure = error }
+            onMessage?(message)
+        }
+    }
+
+    private func closePipe() {
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        try? outputPipe?.fileHandleForReading.close()
+        try? outputPipe?.fileHandleForWriting.close()
+        outputPipe = nil
+    }
+
+    private func finishIfReady(_ process: Process) {
+        guard child === process, exitObserved, outputEnded else { return }
+        closePipe()
+        child = nil
+        process.terminationHandler = nil
+        if process.terminationReason == .uncaughtSignal {
+            failure = failure ?? .cleanupUnverified
+        } else if process.terminationStatus != 0 {
+            failure = failure ?? .managerFailed
+        }
+        if let startedAt, Date().timeIntervalSince(startedAt) >= stableInterval {
+            retryCount = 0
+        }
+        startedAt = nil
+        let intentional = !isEnabled
+        stopRequested = false
+        let requestedLaunch = pendingLaunchOnce
+        pendingLaunchOnce = false
+        onFinished?(failure, intentional)
+        if requestedLaunch, failure == nil { start(launchOnce: true) }
+        // Automatic recovery always observes; the user gesture's one-use
+        // permission is never carried into a replacement manager.
+        if isEnabled, child == nil { scheduleRetry() }
+        onChange?()
+    }
+
+    private func scheduleRetry() {
+        guard isEnabled, child == nil, retryTimer == nil else { return }
+        let delay = Self.retryDelay(retryCount)
+        retryCount = min(retryCount + 1, 4)
+        retryPending = true
+        let timer = Timer(timeInterval: TimeInterval(delay) * timerScale, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.retryTimer = nil
+            self.retryPending = false
+            guard self.isEnabled else { return }
+            self.launch()
+        }
+        retryTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        onRetry?(delay)
+        onChange?()
+    }
+
+    private func cancelRetry() {
+        retryTimer?.invalidate()
+        retryTimer = nil
+        retryPending = false
+    }
+
+    @discardableResult
+    func stop() -> Bool {
+        pendingLaunchOnce = false
+        isEnabled = false
+        cancelRetry()
+        guard let child else {
+            onChange?()
+            return true
+        }
+        guard !stopRequested else { return true }
+        guard signalManagerStop(child) else { return false }
+        stopRequested = true
+        onChange?()
+        return true
+    }
+}
+
 final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let statusLabel = NSMenuItem(title: "", action: nil, keyEquivalent: "")
@@ -258,16 +518,23 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var quitItem: NSMenuItem!
     private var presentation = LauncherPresentation(preferredLanguages: Locale.preferredLanguages)
     private var presentedAlert: (kind: LauncherAlert, alert: NSAlert)?
-    private var child: Process?
-    private var outputPipe: Pipe?
-    private var output = ManagerOutput()
-    private var outputEnded = false
-    private var exitObserved = false
-    private var stopRequested = false
+    private lazy var supervisor = ResidentManagerSupervisor { [weak self] launchOnce in
+        guard let script = self?.bundledScript() else { throw LauncherFailure.resourcesMissing }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-f", script.path] + managerArguments(launchOnce: launchOnce)
+        process.currentDirectoryURL = script.deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let allowed = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"]
+        var environment: [String: String] = [:]
+        for key in allowed { environment[key] = ProcessInfo.processInfo.environment[key] }
+        environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        process.environment = environment
+        return process
+    }
     private var quitRequested = false
-    private var failure: LauncherFailure?
     private var failureAlertShown = false
-    private var waitingAlertShown = false
+    private var recoveryFailure: LauncherFailure?
     private var stopTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -287,8 +554,24 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         quitItem = addItem("", action: #selector(quitLauncher), to: menu)
         statusItem.menu = menu
+        supervisor.onMessage = { [weak self] message in self?.consume(message) }
+        supervisor.onStarted = { [weak self] in self?.setStatus(.starting) }
+        supervisor.onRetry = { [weak self] delay in
+            guard let self else { return }
+            self.setStatus(.recovering(delay, self.recoveryFailure))
+        }
+        supervisor.onChange = { [weak self] in self?.refreshActions() }
+        supervisor.onFinished = { [weak self] error, intentional in
+            self?.managerFinished(error: error, intentional: intentional)
+        }
         refreshLanguage()
-        startManager()
+        // Login/recovery only observes. A manual app launch is an explicit
+        // request to open Codex once; later Codex quits remain respected.
+        if isResidentLaunch(ProcessInfo.processInfo.arguments) {
+            startManager()
+        } else {
+            showCodex()
+        }
     }
 
     @discardableResult
@@ -332,15 +615,16 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func refreshActions() {
         // Keep Start unavailable until termination and final pipe drainage finish.
-        startItem?.isEnabled = child == nil && !quitRequested
-        stopItem?.isEnabled = child?.isRunning == true && !stopRequested
-        showItem?.isEnabled = runningCodex() != nil
+        startItem?.isEnabled = supervisor.child == nil && !quitRequested
+        stopItem?.isEnabled = (supervisor.isEnabled || supervisor.child != nil) && !supervisor.stopRequested
+        showItem?.isEnabled = !quitRequested
     }
 
     func menuWillOpen(_ menu: NSMenu) { refreshActions() }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // A repeated launch keeps the companion in the background.
+        // A double-click is the same explicit intent as the Open Codex menu.
+        showCodex()
         return false
     }
 
@@ -355,134 +639,28 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func startManager() {
-        guard child == nil, !quitRequested else { return }
-        failure = nil
+        guard supervisor.child == nil, !quitRequested else { return }
         failureAlertShown = false
-        waitingAlertShown = false
-        stopRequested = false
-        outputEnded = false
-        exitObserved = false
-        output = ManagerOutput()
-        guard let script = bundledScript() else {
-            presentFailure(.resourcesMissing)
+        supervisor.start()
+    }
+
+    private func consume(_ message: ManagerMessage) {
+        if case let .locale(locale) = message {
+            if presentation.setLocale(locale) { refreshLanguage() }
             return
         }
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-f", script.path]
-        process.currentDirectoryURL = script.deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-        let allowed = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_CTYPE", "__CF_USER_TEXT_ENCODING"]
-        var environment: [String: String] = [:]
-        for key in allowed { environment[key] = ProcessInfo.processInfo.environment[key] }
-        environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
-        process.environment = environment
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = pipe
-        process.standardError = pipe
-        child = process
-        outputPipe = pipe
-        pipe.fileHandleForReading.readabilityHandler = { [weak self, weak process] handle in
-            let data = availableManagerOutput(handle)
-            DispatchQueue.main.async { [weak self, weak process] in
-                guard let self, let process, self.child === process else { return }
-                if data.isEmpty {
-                    self.outputEnded = true
-                    handle.readabilityHandler = nil
-                    self.consume(self.output.finish())
-                    self.finishIfReady(process)
-                } else {
-                    self.consume(self.output.accept(data))
-                }
-            }
-        }
-        process.terminationHandler = { [weak self] process in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.child === process else { return }
-                self.exitObserved = true
-                self.finishIfReady(process)
-                // A misbehaving descendant must not keep the menu stuck by
-                // retaining stdout. Normal manager subprocesses use /dev/null.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                    guard let self, self.child === process, self.exitObserved else { return }
-                    if !self.outputEnded {
-                        self.outputEnded = true
-                        self.failure = self.failure ?? .cleanupUnverified
-                        self.consume(self.output.finish())
-                        self.finishIfReady(process)
-                    }
-                }
-            }
-        }
-        setStatus(.starting)
-        do {
-            try process.run()
-            // The child owns a duplicate. Closing ours allows reliable EOF.
-            try? pipe.fileHandleForWriting.close()
-            refreshActions()
-        } catch {
-            pipe.fileHandleForReading.readabilityHandler = nil
-            process.terminationHandler = nil
-            try? pipe.fileHandleForReading.close()
-            try? pipe.fileHandleForWriting.close()
-            outputPipe = nil
-            child = nil
-            presentFailure(.launchFailed)
-        }
+        guard !supervisor.stopRequested else { return }
+        if let status = message.status { setStatus(status) }
+        // Background retries only update the menu. Modal warnings here would
+        // steal focus on each reconnect and can turn a crash into an alert loop.
     }
 
-    private func consume(_ messages: [ManagerMessage]) {
-        for message in messages {
-            if case let .locale(locale) = message {
-                if presentation.setLocale(locale) { refreshLanguage() }
-                continue
-            }
-            if case let .failure(error) = message {
-                failure = error
-                setStatus(.failure(error, retry: false))
-                continue
-            }
-            guard !stopRequested, failure == nil else { continue }
-            switch message {
-            case .waitingForCodex:
-                setStatus(.waitingForCodex)
-                if !waitingAlertShown {
-                    waitingAlertShown = true
-                    showAlert(.waitingForCodex)
-                }
-            case .attaching:
-                setStatus(.attaching)
-            case .waitingForComposer:
-                setStatus(.waitingForComposer)
-            case let .visible(count, waiting):
-                setStatus(.visible(count, waiting))
-            case .detached:
-                setStatus(.detached)
-            case .codexExited:
-                setStatus(.codexExited)
-            case .cancelled:
-                setStatus(.cancelled)
-            case .failure, .locale: break
-            }
-        }
-    }
-
-    private func finishIfReady(_ process: Process) {
-        guard child === process, exitObserved, outputEnded else { return }
+    private func managerFinished(error: LauncherFailure?, intentional: Bool) {
         stopTimer?.invalidate()
         stopTimer = nil
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
-        try? outputPipe?.fileHandleForReading.close()
-        outputPipe = nil
-        child = nil
-        process.terminationHandler = nil
-        if process.terminationReason == .uncaughtSignal {
-            failure = failure ?? .cleanupUnverified
-        } else if process.terminationStatus != 0 {
-            failure = failure ?? .managerFailed
-        }
-        if let error = failure {
+        recoveryFailure = error
+        guard intentional else { return } // supervisor publishes its next retry
+        if let error {
             if quitRequested {
                 quitRequested = false
                 NSApp.reply(toApplicationShouldTerminate: false)
@@ -492,34 +670,32 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
             setStatus(.stopped)
             if quitRequested { NSApp.reply(toApplicationShouldTerminate: true) }
         }
-        stopRequested = false
         refreshActions()
     }
 
     @objc private func stopManager() { requestStop() }
 
     private func requestStop() {
-        guard let process = child else { return }
-        setStatus(.stopping)
-        if !stopRequested {
-            // Darwin's Process.terminate() also signals the child's process
-            // group, interrupting its in-flight ps/lsof checks. Signal only the
-            // positive PID of our retained Process after its liveness check;
-            // never use saved PIDs, negative PIDs or a process-group signal.
-            if !signalManagerStop(process) {
-                if quitRequested {
-                    quitRequested = false
-                }
-                setStatus(.stopFailed)
-                showAlert(.stopFailed)
-                return
-            }
-            stopRequested = true
+        // Stop cancels the pending timer even when there is no child to signal.
+        if !supervisor.stop() {
+            if quitRequested { quitRequested = false }
+            setStatus(.stopFailed)
+            showAlert(.stopFailed)
+            return
         }
-        refreshActions()
+        guard supervisor.child != nil else {
+            setStatus(.stopped)
+            return
+        }
+        waitForManagerCleanup()
+    }
+
+    private func waitForManagerCleanup() {
+        guard let process = supervisor.child else { return }
+        setStatus(.stopping)
         stopTimer?.invalidate()
         stopTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: false) { [weak self, weak process] _ in
-            guard let self, let process, self.child === process else { return }
+            guard let self, let process, self.supervisor.child === process else { return }
             if self.quitRequested {
                 self.quitRequested = false
                 NSApp.reply(toApplicationShouldTerminate: false)
@@ -532,7 +708,10 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func quitLauncher() { NSApp.terminate(nil) }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard child != nil else { return .terminateNow }
+        guard supervisor.child != nil else {
+            supervisor.stop()
+            return .terminateNow
+        }
         quitRequested = true
         requestStop()
         return quitRequested ? .terminateLater : .terminateCancel
@@ -546,14 +725,21 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func showCodex() {
-        // Activate an existing original application only. Cold-starting it here
-        // would omit the manager's debugging flags and undermine the launcher.
-        guard let codex = runningCodex() else { return }
-        codex.activate(options: [])
+        guard !quitRequested else { return }
+        let requested = supervisor.openCodex { [weak self] in
+            guard let codex = self?.runningCodex() else { return false }
+            codex.activate(options: [])
+            return true
+        }
+        if !requested {
+            setStatus(.stopFailed)
+            showAlert(.stopFailed)
+        } else if supervisor.stopRequested {
+            waitForManagerCleanup()
+        }
     }
 
     private func presentFailure(_ error: LauncherFailure) {
-        failure = error
         setStatus(.failure(error, retry: true))
         guard !failureAlertShown else { return }
         failureAlertShown = true
@@ -576,7 +762,7 @@ final class UsageBarLauncher: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 #if LAUNCHER_TESTS
 // Compile with -D LAUNCHER_TESTS for offline protocol/buffering checks. This
-// branch never creates NSApplication, a manager or a Codex process.
+// branch never creates NSApplication, a real manager or a Codex process.
 var checks = 0
 func check(_ condition: @autoclosure () -> Bool) {
     precondition(condition(), "Launcher protocol check failed")
@@ -604,7 +790,7 @@ check(presentation.setLocale(.english))
 check(presentation.status == .visible(2, 1))
 check(presentation.menu == LauncherMenuCopy(locale: .english))
 check(presentation.menu.statusBar == "Usage")
-check(presentation.menu.show == "Show Codex")
+check(presentation.menu.show == "Open Codex")
 check(presentation.menu.start == "Start Usage Bar")
 check(presentation.menu.stop == "Stop Usage Bar")
 check(presentation.menu.quit == "Quit Usage Bar")
@@ -615,7 +801,8 @@ check(!presentation.setLocale(.english))
 check(presentation.status == .visible(2, 1))
 let states: [LauncherStatus] = [.starting, .waitingForCodex, .attaching, .waitingForComposer,
     .visible(1, 0), .visible(2, 3), .detached, .codexExited, .cancelled, .stopped,
-    .stopping, .stopFailed, .waitingForCleanup, .failure(.cleanupUnverified, retry: false),
+    .stopping, .stopFailed, .waitingForCleanup, .residentWaiting, .needsLauncher,
+    .quotaRetrying, .recovering(5, nil), .recovering(10, .pythonMissing), .failure(.cleanupUnverified, retry: false),
     .failure(.managerFailed, retry: true)]
 for status in states {
     presentation.status = status
@@ -729,6 +916,235 @@ check(fixture.terminationReason == .exit && fixture.terminationStatus == 0)
 let fixtureResult = try JSONSerialization.jsonObject(with: fixtureData) as? [String: Bool]
 check(fixtureResult?["parentTerminated"] == true)
 check(fixtureResult?["grandchildStoppedBeforeCleanup"] == false)
+// Serialized protocol -> the exact semantic UI mapping used by the app.
+let residentStates: [(String, LauncherStatus)] = [
+    ("waiting", .residentWaiting), ("waiting-for-quit", .waitingForCodex),
+    ("attached", .attaching), ("needs-launcher", .needsLauncher), ("quota-retrying", .quotaRetrying)
+]
+for (wire, expected) in residentStates {
+    var decoder = ManagerOutput()
+    let serialized = Data(("codex-usage-bar-resident:" + wire + "\n").utf8)
+    check(decoder.accept(serialized.prefix(13)).isEmpty)
+    let messages = decoder.accept(serialized.dropFirst(13))
+    check(messages.count == 1)
+    check(messages.first?.status == expected)
+    presentation.status = messages.first!.status!
+    check(!presentation.current.title.isEmpty)
+}
+for suffix in ["", "attached:private", " attached", "attached ", "unknown"] {
+    check(ManagerMessage.parse("codex-usage-bar-resident:" + suffix) == nil)
+}
+
+// Exercise the actual production Process -> pipe -> termination -> Timer ->
+// retry path. Time scaling shortens delays, not the scheduler or callbacks.
+func spinUntil(_ predicate: () -> Bool, timeout: TimeInterval = 4) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !predicate() && Date() < deadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+    }
+    return predicate()
+}
+func spinFor(_ duration: TimeInterval) {
+    let deadline = Date().addingTimeInterval(duration)
+    while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
+}
+func dummyProcess(_ script: String) -> Process {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+    process.arguments = ["-I", "-u", "-c", script]
+    return process
+}
+var launches = 0
+var retryDelays: [Int] = []
+var lifecycleMessages: [ManagerMessage] = []
+var completions: [(LauncherFailure?, Bool)] = []
+let crashSupervisor = ResidentManagerSupervisor(timerScale: 0.005) { _ in
+    launches += 1
+    return dummyProcess("import sys\nprint('codex-usage-bar-resident:attached')\nsys.exit(7)")
+}
+crashSupervisor.onMessage = { message in
+    lifecycleMessages.append(message)
+    if let status = message.status { presentation.status = status }
+}
+crashSupervisor.onFinished = { error, intentional in completions.append((error, intentional)) }
+crashSupervisor.onRetry = { delay in
+    retryDelays.append(delay)
+    if retryDelays.count == 6 { check(crashSupervisor.stop()) }
+}
+crashSupervisor.start()
+check(spinUntil { retryDelays.count == 6 })
+check(launches == 6)
+check(retryDelays == [5, 10, 20, 40, 60, 60])
+check(completions.count == 6 && completions.allSatisfy { $0.0 == .managerFailed && !$0.1 })
+check(lifecycleMessages == Array(repeating: .attaching, count: 6))
+check(presentation.status == .attaching)
+check(crashSupervisor.child == nil && !crashSupervisor.retryPending && !crashSupervisor.isEnabled)
+spinFor(0.4)
+check(launches == 6) // Stop cancels the installed 60-second retry timer.
+// A deliberate re-open of a stopped companion resets backoff and starts again.
+crashSupervisor.onRetry = { delay in
+    retryDelays.append(delay)
+    check(crashSupervisor.stop())
+}
+crashSupervisor.start()
+check(spinUntil { retryDelays.count == 7 })
+check(launches == 7 && retryDelays.last == 5)
+
+// A clean but unsolicited exit must also restart in resident mode.
+var zeroLaunches = 0
+var zeroRetries = 0
+let zeroSupervisor = ResidentManagerSupervisor(timerScale: 0.002) { _ in
+    zeroLaunches += 1
+    return dummyProcess("print('codex-usage-bar-resident:waiting')")
+}
+zeroSupervisor.onRetry = { _ in
+    zeroRetries += 1
+    if zeroRetries == 2 { check(zeroSupervisor.stop()) }
+}
+zeroSupervisor.start()
+check(spinUntil { zeroRetries == 2 })
+check(zeroLaunches == 2)
+
+// A manager that survives the stability window resets its next crash delay.
+var stableLaunches = 0
+var stableDelays: [Int] = []
+let stableSupervisor = ResidentManagerSupervisor(timerScale: 0.002, stableInterval: 0.5) { _ in
+    stableLaunches += 1
+    return dummyProcess(stableLaunches == 3 ? "import time; time.sleep(0.6)" : "raise SystemExit(3)")
+}
+stableSupervisor.onRetry = { delay in
+    stableDelays.append(delay)
+    if stableDelays.count == 3 { check(stableSupervisor.stop()) }
+}
+stableSupervisor.start()
+check(spinUntil { stableDelays.count == 3 })
+check(stableDelays == [5, 10, 5])
+
+// Stop an alive manager through the real direct-PID signal path; its handled
+// SIGTERM exits normally and must never schedule another launch.
+var aliveLaunches = 0
+var aliveReady = false
+var aliveFinished = false
+var aliveRetries = 0
+let aliveSupervisor = ResidentManagerSupervisor(timerScale: 0.002) { _ in
+    aliveLaunches += 1
+    return dummyProcess("import signal,sys,time\nsignal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\nprint('codex-usage-bar-resident:attached')\ntime.sleep(4)")
+}
+aliveSupervisor.onMessage = { if $0 == .attaching { aliveReady = true } }
+aliveSupervisor.onFinished = { error, intentional in
+    check(error == nil && intentional)
+    aliveFinished = true
+}
+aliveSupervisor.onRetry = { _ in aliveRetries += 1 }
+aliveSupervisor.start()
+check(spinUntil { aliveReady })
+check(aliveSupervisor.stop())
+check(spinUntil { aliveFinished })
+spinFor(0.08)
+check(aliveLaunches == 1 && aliveRetries == 0)
+check(aliveSupervisor.child == nil && !aliveSupervisor.isEnabled)
+
+// Launch failures use the same bounded scheduler without a modal alert loop.
+var failedAttempts = 0
+var launchErrors: [LauncherFailure] = []
+let missingSupervisor = ResidentManagerSupervisor(timerScale: 0.002) { _ in
+    failedAttempts += 1
+    throw LauncherFailure.resourcesMissing
+}
+missingSupervisor.onFinished = { error, intentional in
+    check(!intentional)
+    if let error { launchErrors.append(error) }
+}
+missingSupervisor.onRetry = { _ in check(missingSupervisor.stop()) }
+missingSupervisor.start()
+spinFor(0.04)
+check(failedAttempts == 1 && launchErrors == [.resourcesMissing])
+check(!missingSupervisor.retryPending)
+// Production startup intent and argument serialization: login never grants a
+// launch, while explicit opens grant one permission that automatic retry drops.
+check(isResidentLaunch(["launcher", "--resident"]))
+check(!isResidentLaunch(["launcher"]))
+check(!isResidentLaunch(["launcher", "-psn_0_1234"]))
+check(!managerArguments(launchOnce: false).contains("--launch-once"))
+check(managerArguments(launchOnce: true).filter { $0 == "--launch-once" }.count == 1)
+check(managerArguments(launchOnce: false).last == String(ProcessInfo.processInfo.processIdentifier))
+var intentFlags: [Bool] = []
+var intentWireStates: [LauncherStatus] = []
+var intentRetries = 0
+let intentSupervisor = ResidentManagerSupervisor(timerScale: 0.002) { launchOnce in
+    intentFlags.append(launchOnce)
+    let process = dummyProcess("import sys\nprint('codex-usage-bar-resident:' + ('attached' if '--launch-once' in sys.argv else 'waiting'))\nraise SystemExit(7)")
+    process.arguments! += managerArguments(launchOnce: launchOnce)
+    return process
+}
+intentSupervisor.onMessage = { if let status = $0.status { intentWireStates.append(status) } }
+intentSupervisor.onRetry = { _ in
+    intentRetries += 1
+    if intentRetries == 2 { check(intentSupervisor.stop()) }
+}
+check(intentSupervisor.openCodex { false })
+check(spinUntil { intentRetries == 2 })
+check(intentFlags == [true, false])
+check(intentWireStates == [.attaching, .residentWaiting])
+
+// Same menu/reopen path while an observer is alive: wait for its normal cleanup,
+// restart with one launch permission, then remain observing after the app quits.
+var replacementFlags: [Bool] = []
+var replacementStatuses: [LauncherStatus] = []
+var replacementFinishes = 0
+let replacementSupervisor = ResidentManagerSupervisor(timerScale: 0.002) { launchOnce in
+    replacementFlags.append(launchOnce)
+    let process = dummyProcess("import signal,sys,time\nsignal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\nprint('codex-usage-bar-resident:' + ('attached' if '--launch-once' in sys.argv else 'waiting'))\ntime.sleep(4)")
+    process.arguments! += managerArguments(launchOnce: launchOnce)
+    return process
+}
+replacementSupervisor.onMessage = { if let status = $0.status { replacementStatuses.append(status) } }
+replacementSupervisor.onFinished = { error, intentional in
+    check(error == nil && intentional)
+    replacementFinishes += 1
+}
+replacementSupervisor.start() // Start Usage Bar only restores the observer.
+check(spinUntil { replacementStatuses == [.residentWaiting] })
+var activations = 0
+check(replacementSupervisor.openCodex { activations += 1; return true })
+spinFor(0.04)
+check(activations == 1 && replacementFlags == [false]) // existing app: activate only
+check(replacementSupervisor.openCodex { false }) // menu/reopen with Codex closed
+check(spinUntil { replacementStatuses == [.residentWaiting, .attaching] })
+check(replacementFlags == [false, true] && replacementFinishes == 1)
+check(replacementSupervisor.stop())
+check(spinUntil { replacementFinishes == 2 })
+
+// A Stop gesture after an explicit open but before cleanup cancels that request.
+replacementStatuses = []
+replacementSupervisor.start()
+check(spinUntil { replacementStatuses == [.residentWaiting] })
+check(replacementSupervisor.openCodex { false })
+check(replacementSupervisor.stop())
+check(spinUntil { replacementFinishes == 3 })
+spinFor(0.05)
+check(replacementFlags == [false, true, false])
+check(replacementSupervisor.child == nil && !replacementSupervisor.isEnabled)
+
+// An explicit open cannot bypass unconfirmed manager cleanup.
+var unsafeFlags: [Bool] = []
+var unsafeReady = false
+var unsafeFinished = false
+let unsafeSupervisor = ResidentManagerSupervisor(timerScale: 0.002) { launchOnce in
+    unsafeFlags.append(launchOnce)
+    return dummyProcess("import signal,sys,time\nsignal.signal(signal.SIGTERM, lambda *_: sys.exit(9))\nprint('codex-usage-bar-resident:waiting')\ntime.sleep(4)")
+}
+unsafeSupervisor.onMessage = { if $0 == .residentWaiting { unsafeReady = true } }
+unsafeSupervisor.onFinished = { error, intentional in
+    check(error == .managerFailed && intentional)
+    unsafeFinished = true
+}
+unsafeSupervisor.start()
+check(spinUntil { unsafeReady })
+check(unsafeSupervisor.openCodex { false })
+check(spinUntil { unsafeFinished })
+spinFor(0.05)
+check(unsafeFlags == [false] && unsafeSupervisor.child == nil)
 print("Native launcher: \(checks) offline checks passed; no application launched.")
 #else
 let application = NSApplication.shared

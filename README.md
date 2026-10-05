@@ -4,7 +4,9 @@
 
 ![codex-usage-bar 功能概览：原生输入框上方的额度栏、原创 Sprig 3D 伙伴、一键折叠与主题适配。图中额度为虚构示例。](docs/assets/overview.svg)
 
-Codex 日常桌面实例的额度信息栏，带原创软胶风格 3D 角色芽团 Sprig。版本 **0.9.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+Codex 日常桌面实例的额度信息栏，带原创软胶风格 3D 角色芽团 Sprig。版本 **0.10.1，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+
+> **使用前请注意：** 当前请通过 `codex-usage-bar.app` 或菜单栏「额度 → 打开 Codex」启动。**直接点击官方 Codex 图标，额度条不会自动出现。** 退出 Codex 后会保持关闭；可选登录常驻只在后台等待，不会自动重开 Codex。
 
 **24 秒认识 Sprig** · 1080 × 1350，60 fps，原创配乐。点击海报打开 GitHub 视频文件页。
 
@@ -40,13 +42,32 @@ open "$HOME/Applications/codex-usage-bar.app"
 
 启动后静默在后台刷新，**不开终端，不弹控制窗口**，额度条留在日常 Codex 输入框上方。macOS 顶部的 **“额度”** 菜单提供状态、停止、重新启动及退出入口；正常使用无需操作菜单。
 
-如果当前 Codex 已由本启动器打开，会直接重连。若是从官方图标普通启动，菜单会显示等待状态，并提示先保存工作、正常退出 Codex；启动器会用原资料重新打开。不会强制结束日常任务。
+如果当前 Codex 已由本启动器打开，会直接重连。若是从官方图标普通启动，菜单会提示需要使用额度条入口：正常退出 Codex 后，双击 codex-usage-bar.app 或选择“额度 → 打开 Codex”。不会强制结束日常任务，也不会在后台等待后擅自重开。
 
-以后通过 **codex-usage-bar.app** 打开日常 Codex。普通官方图标冷启动不会自动加上额度条需要的调试参数。应用不添加开机自启，不替换 Dock 图标或官方 Codex 文件。
+原生伴侣采用随行模式：Codex 打开时连接额度条，Codex 退出后保持关闭，伴侣转入后台等待。管理器异常结束仍按 5、10、20、40、60 秒退避恢复，但恢复只尝试连接已有实例，不启动 Codex。只有手动打开 codex-usage-bar.app 或选择“额度 → 打开 Codex”才允许一次启动。普通官方图标不附带连接参数；要带额度条打开，请使用上述入口。
 
-**停止与退出：** 在菜单栏“额度”选择停止或退出，只会要求自身启动的管理器清理横条，日常 Codex 继续运行。清理失败会明确提示，不会强退 Codex。要关闭本机调试端口，请正常退出 Codex（Cmd-Q）。端口仅监听 `127.0.0.1`，不能向不可信程序开放。
+**登录后常驻（明确启用）：** 安装完成后，先在菜单栏「额度」选择「退出额度条」，确认当前额度条伴侣已经关闭，再在源码目录运行：
 
-这是未经开发者签名和公证的本机应用，需要外部 Python 与 Codex；构建产物可能有编译器生成的临时签名。安装不下载依赖、不改 Codex 签名、不绕过 Gatekeeper、不添加自启动或新的系统敏感权限。
+```sh
+python3 platforms/macos/resident.py enable
+python3 platforms/macos/resident.py status
+```
+
+这会注册当前用户的独立 LaunchAgent，登录后只启动轻量伴侣等待，不启动 Codex。伴侣异常退出后由系统恢复，也不会顺带启动 Codex。它不会修改 Dock、官方 Codex 文件或全局环境。主动选择“退出额度条”后，本次登录不会立即拉回；下次登录仍会等待。再次执行 `enable` 可恢复观察。
+
+首次启用登录常驻前不要同时保留手动打开的伴侣，否则可能出现两个「额度」菜单。登录任务已经运行时，无需重复手动启动伴侣。
+
+**停止与退出：** 直接按 ⌘Q 退出 Codex，它会保持关闭，已有本机调试端口随之关闭，不必先退出额度条。菜单栏“额度”的停止或退出只会取消伴侣恢复、清理自有横条，仍在运行的 Codex 保持不变。清理失败会明确提示，不会强退 Codex。端口仅监听 `127.0.0.1`，不能向不可信程序开放。
+
+取消登录常驻时，先从菜单退出伴侣，再运行 `python3 platforms/macos/resident.py disable`；只注销本项目任务。不会关闭 Codex 或删除账号资料。
+
+这是未经开发者签名和公证的本机应用，需要外部 Python 与 Codex；构建产物可能有编译器生成的临时签名。安装不下载依赖、不改 Codex 签名、不绕过 Gatekeeper 或申请新的系统敏感权限。登录常驻仅由上述显式 `enable` 命令注册。
+
+## 已知限制与欢迎协作
+
+目前待解决的是：**从 Dock、Spotlight 或应用程序文件夹直接打开官方 Codex 时，也能自动显示输入框上方的额度条。** 现有后台可以发现普通实例，但显示层依赖启动时启用的本机调试连接，因此后台自启动不等于能够自动附加。
+
+欢迎在 [Issues](https://github.com/manson341349-beep/codex-usage-bar/issues) 讨论可复现的接入方案，或报告适配问题。目标是保留官方启动习惯、正常退出行为和现有账号资料，不修改官方应用安装包。请注明 macOS / Codex 版本、启动入口及复现步骤；不要附带账号凭据、聊天内容或未脱敏的本机日志。
 
 ## 当前能力与限制
 
@@ -75,6 +96,8 @@ open "$HOME/Applications/codex-usage-bar.app"
 
 ```sh
 python3 -B -m codex_bar daily --acknowledge-runtime --wait-for-exit
+python3 -B -m codex_bar daily --acknowledge-runtime --resident
+python3 -B -m codex_bar daily --acknowledge-runtime --resident --launch-once
 python3 -B -m codex_bar daily-status
 ```
 
@@ -82,7 +105,7 @@ python3 -B -m codex_bar daily-status
 
 ## 升级、卸载与恢复
 
-先在菜单栏“额度”选择退出，使伴侣应用和管理器结束。旧版外部终端入口使用 Ctrl-C 退出。安装器发现管理器锁被占用时会拒绝覆盖。重新运行安装命令升级；旧 `.app` 会保留在 `~/Applications/.codex-usage-bar-backups/`，原有资料不迁移。
+先在菜单栏“额度”选择退出，使伴侣应用和管理器结束；已启用登录常驻时先运行 `python3 platforms/macos/resident.py disable` 注销任务。旧版外部终端入口使用 Ctrl-C 退出。安装器发现管理器锁被占用时会拒绝覆盖。运行 `python3 platforms/macos/install.py --replace-existing` 可原子替换已确认归属的应用，不保留额外备份；安装失败会尝试回换原应用；回换或清理失败会单独报告。原有资料不迁移。默认不带此选项的安装仍将旧 `.app` 保留在 `~/Applications/.codex-usage-bar-backups/`。升级完成后重新运行 `resident.py enable` 恢复常驻。
 
 已由本启动器启用的日常 Codex 可以保持运行。旧管理器成功清理自有横条后，新版伴侣会验证保存的进程身份和本机端口并重连；这需要重新启动额度条伴侣，不是对正在运行的管理器热替换。若清理或身份核验失败，按明确提示处理，不强行接管旧桥接。
 
@@ -96,7 +119,7 @@ python3 platforms/macos/install.py --uninstall
 
 ## 数据与开发
 
-额度桥接仅在内存用官方账户元数据生成身份指纹，不输出身份或记录磁盘额度缓存。官方 Codex 自行处理登录和网络；本项目不读取认证文件、聊天历史或输入文本，不发送模型生成请求。当前会话 UUID 和主机标识只在页面内存用于匹配通知，不向后端、日志或公开包导出；通知只复制累计输入与累计缓存输入两个数值。生命周期文件只记录验证进程归属所需的本机元数据，留在私有支持目录，不上传。
+额度桥接仅在内存用官方账户元数据生成身份指纹，不输出身份或记录磁盘额度缓存。官方 Codex 自行处理登录和网络；本项目不读取认证文件、聊天历史或输入文本，不发送模型生成请求。当前会话 UUID 和主机标识只在页面内存用于匹配通知，不向后端、日志或公开包导出；通知只复制累计输入与累计缓存输入两个数值。生命周期文件保存验证进程归属所需的本机元数据及恢复自有桥接的随机种子，留在私有支持目录，不上传；新 Codex 实例会更换种子。
 
 角色运行时、建模和动作源码位于 `web/sprig-source/`，Three.js r180 的本地模块位于 `web/vendor/`。开发时使用 Node.js 22 和锁定的 esbuild 0.25.11 生成单份 `web/sprig.js`；该运行文件不从 CDN 加载代码。首次安装开发依赖需要访问 npm：
 
@@ -114,7 +137,7 @@ python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
 node --test tests/test_frontend.js tests/test_sprig_runtime.js tests/test_i18n.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.9.0-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.10.1-source.zip
 ```
 
 构建只使用白名单文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 包含自有前端与注明许可的 Three.js，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。

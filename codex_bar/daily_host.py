@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
+import secrets
 
 from .host import (EXECUTABLE, HostError, LEXICAL_PROJECT_ROOT, ManagedHost,
                    OwnedEndpoint, System, installation_paths)
@@ -105,6 +107,9 @@ class DailyHost(ManagedHost):
                 or state.get('quotaHome') != str(self.quota_home)
                 or state.get('status') not in ('starting', 'running', 'detached', 'stopped')):
             raise HostError('invalid_daily_host_state')
+        if 'recoverySeed' in state and (type(state['recoverySeed']) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', state['recoverySeed']) is None):
+            raise HostError('invalid_daily_recovery_seed')
         # Reuse schema/fingerprint checks without broadening isolated semantics.
         compatible = dict(state)
         if compatible['status'] == 'detached':
@@ -220,6 +225,22 @@ class DailyHost(ManagedHost):
         self._guard(state)
         return OwnedEndpoint(state['pid'], state['port'], self.profile_root)
 
+    def recovery_seed(self) -> str:
+        """Return authority only for a freshly verified host under our exclusive lock.
+
+        Older records may lack a seed. Migrate only after the process, exact
+        command and listener pass the same checks as a debugger operation.
+        The private host record is the only persistent storage of this secret.
+        """
+        state = self._load()
+        if state is None or state['status'] == 'stopped':
+            raise HostError('no_running_daily_instance')
+        self._guard(state)
+        if 'recoverySeed' not in state:
+            state['recoverySeed'] = secrets.token_hex(32)
+            self._save(state)
+        return state['recoverySeed']
+
     def is_running(self) -> bool:
         state = self._load()
         if state is None or state['status'] == 'stopped':
@@ -249,10 +270,15 @@ class DailyHost(ManagedHost):
                 'ownedProcessCount': len(owned), 'debugPortOpen': port_open,
                 'appLeftRunning': bool(owned), 'profileRetained': True}
 
-    def launch_or_attach(self, *, timeout=35) -> OwnedEndpoint:
+    def launch_or_attach(self, *, timeout=35, allow_launch=True, cancelled=None) -> OwnedEndpoint | None:
+        """Attach a verified instance; spawning requires an explicit caller permit."""
         self._require_lock()
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 60:
+        if (type(allow_launch) is not bool or (cancelled is not None and not callable(cancelled))
+                or isinstance(timeout, bool) or
+                not isinstance(timeout, (int, float)) or not 0 < timeout <= 60):
             raise HostError('invalid_launch_options')
+        if cancelled is not None and cancelled():
+            return None
         self._prepare_profile()
         previous = self._load()
         if previous:
@@ -266,8 +292,15 @@ class DailyHost(ManagedHost):
                 return OwnedEndpoint(previous['pid'], previous['port'], self.profile_root)
             if owned:
                 raise HostError('daily_instance_running')
-            if self.system.listeners(previous['port']):
+            if allow_launch and self.system.listeners(previous['port']):
                 raise HostError('stale_state_port_in_use')
+        if not allow_launch:
+            # Observation grants no authority to spawn, so it needs only main
+            # process metadata. Avoid recursively scanning the user's profile
+            # every idle heartbeat; actual launches retain the full preflight.
+            if self._external_users(self.system.snapshot(), scan_profile=False):
+                raise HostError('daily_instance_running')
+            return None
         self.preflight()
         self.system.verify_signature()
         with self.system.reserve_port() as port:
@@ -278,6 +311,10 @@ class DailyHost(ManagedHost):
         initial = self.system.snapshot()
         if self._external_users(initial):
             raise HostError('daily_instance_running')
+        # Stop or loss of the supervisor can arrive during the blocking checks
+        # above. Recheck at the process-creation boundary, before opening Codex.
+        if cancelled is not None and cancelled():
+            return None
         self._proc = self.system.spawn(self._args(port),
                                        daily_environment(self.installation['home'], self.quota_home,
                                                          self.profile_root),
@@ -292,6 +329,7 @@ class DailyHost(ManagedHost):
             state = {'version': 1, 'mode': 'daily', 'status': 'starting', 'pid': main.pid,
                      'port': port, 'profileRoot': str(self.profile_root),
                      'quotaHome': str(self.quota_home),
+                     'recoverySeed': secrets.token_hex(32),
                      'known': {str(main.pid): list(main.fingerprint)},
                      'initialPids': sorted(initial)}
             self._save(state)

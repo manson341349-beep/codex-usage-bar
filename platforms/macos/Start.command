@@ -5,11 +5,40 @@ script_dir=${0:A:h}
 resource_root=${script_dir:h:h}
 cd "$resource_root"
 
+# Native/login launches use one explicit mode; never forward arbitrary arguments.
+typeset -a mode_args
+mode_args=()
+if (( $# )); then
+    if [[ "$1" != '--resident' ]]; then
+        print -u2 'Usage: Start.command [--resident [--launch-once] [--supervisor-pid PID]]'
+        exit 2
+    fi
+    mode_args=(--resident)
+    shift
+    if (( $# )) && [[ "$1" == '--launch-once' ]]; then
+        mode_args+=(--launch-once)
+        shift
+    fi
+    if (( $# == 2 )) && [[ "$1" == '--supervisor-pid' && "$2" == <2-2147483647> ]]; then
+        mode_args+=(--supervisor-pid "$2")
+        shift 2
+    fi
+    if (( $# )); then
+        print -u2 'Usage: Start.command [--resident [--launch-once] [--supervisor-pid PID]]'
+        exit 2
+    fi
+fi
+
 print 'codex-usage-bar'
-print 'Starts your regular Codex with its existing login, settings, and conversation history.'
+print 'Uses your regular Codex with its existing login, settings, and conversation history.'
 print 'The usage bar stays above the native composer on home and conversation pages.'
 print 'An instance already started by this launcher can reconnect without restarting.'
-print 'If Codex was opened directly, save your work and quit it with Cmd-Q once; this launcher waits.'
+if (( ${#mode_args} )); then
+    print 'Resident mode stays available; closing Codex keeps it closed.'
+    print 'To open Codex once, choose Open Codex in the menu or explicitly pass --launch-once.'
+else
+    print 'If Codex was opened directly, save your work and quit it with Cmd-Q once; this launcher waits.'
+fi
 print 'Press Ctrl-C here to remove the bar and leave Codex running.'
 print 'The local debug port stays open until you quit Codex with Cmd-Q.'
 print ''
@@ -29,4 +58,4 @@ if [[ -z "$python_path" ]]; then
 fi
 
 # Ignore Python environment overrides and user-site packages; leave no .pyc in the app.
-exec "$python_path" -E -s -B -m codex_bar daily --acknowledge-runtime --wait-for-exit
+exec "$python_path" -E -s -B -m codex_bar daily --acknowledge-runtime --wait-for-exit "${mode_args[@]}"

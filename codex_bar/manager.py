@@ -9,11 +9,15 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
+import hmac
 import json
+import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import sys
+import threading
 import time
 
 from .cdp import BrowserSession, CDPError
@@ -30,6 +34,45 @@ SUPPORTED_LOCALES = ('zh-CN', 'en')
 
 class ManagerError(RuntimeError):
     pass
+
+
+def recovery_token(seed: str, target_id: str) -> str:
+    """Derive a per-page owner from a private, verified host generation."""
+    if (type(seed) is not str or re.fullmatch(r'[0-9a-f]{64}', seed) is None or
+            type(target_id) is not str or re.fullmatch(r'[A-Za-z0-9_-]{1,256}', target_id) is None):
+        raise ManagerError('invalid_renderer_recovery_identity')
+    return hmac.new(bytes.fromhex(seed), b'codex-usage-bar.page.v1\0' + target_id.encode('ascii'),
+                    hashlib.sha256).hexdigest()
+
+
+@contextmanager
+def supervisor_lifetime(stop, supervisor_pid):
+    """An explicitly supervised manager cannot outlive its direct parent.
+
+    A dead parent is reparented before its PID can be reused. We require the
+    direct parent relationship at entry and latch its loss; an unrelated process
+    reusing the numeric PID can never regain this relationship or clear Stop.
+    No signal is sent to either the supervisor or Codex.
+    """
+    if supervisor_pid is None:
+        yield
+        return
+    if (type(supervisor_pid) is not int or not 2 <= supervisor_pid <= 2147483647 or
+            os.getppid() != supervisor_pid):
+        raise ManagerError('invalid_supervisor_identity')
+    cancelled = threading.Event()
+    def watch():
+        while not cancelled.wait(.2):
+            if os.getppid() != supervisor_pid:
+                stop[0] = True
+                return
+    watcher = threading.Thread(target=watch, name='supervisor-lifetime', daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        cancelled.set()
+        watcher.join(timeout=1)
 
 
 def read_assets(root: Path = PROJECT_ROOT) -> dict[str, str]:
@@ -192,8 +235,11 @@ class RendererCollection:
     on the next heartbeat. Ownership tokens survive transport reconnects so a
     bridge already installed by this manager is reused instead of replaced.
     """
-    def __init__(self, port, validate, assets):
+    def __init__(self, port, validate, assets, *, recovery_seed=None):
         self.port, self.validate, self.assets = port, validate, assets
+        if recovery_seed is not None:
+            recovery_token(recovery_seed, 'validation')
+        self.recovery_seed = recovery_seed
         self.session = None
         self.targets = {}
         self._locale = None
@@ -242,7 +288,9 @@ class RendererCollection:
         result = {'pages': len(ids), 'mounted': 0, 'visible': 0, 'unavailable': 0}
         locale_candidates = []
         for index, target_id in enumerate(ids):
-            state = self.targets.setdefault(target_id, {'token': secrets.token_hex(16),
+            token = (recovery_token(self.recovery_seed, target_id) if self.recovery_seed is not None
+                     else secrets.token_hex(16))
+            state = self.targets.setdefault(target_id, {'token': token,
                          'renderer': None, 'failures': 0, 'next_attempt': 0.0})
             if now < state['next_attempt']:
                 result['unavailable'] += 1
@@ -427,113 +475,173 @@ def run_foreground(*, duration=0, login_only=False, reuse_approved_profile=False
                 print('专用实例和调试端口已关闭；登录资料保留。', flush=True)
 
 
-def run_daily(*, duration=0, wait_for_exit=False):
-    """Attach the bar to the original daily profile; never stop the user's app."""
+def run_daily(*, duration=0, wait_for_exit=False, resident=False, supervisor_pid=None,
+              launch_once=False):
+    """Observe Codex in resident mode; only a one-shot user request may open it."""
+    if supervisor_pid is not None and not resident:
+        raise ManagerError('supervisor_requires_resident')
+    if type(launch_once) is not bool or (launch_once and not resident):
+        raise ManagerError('launch_once_requires_resident')
     assets = read_assets()
-    with DailyHost() as host, stop_signals() as stop:
-        endpoint = None
-        announced_wait = False
-        while not stop[0]:
+    with stop_signals() as stop, supervisor_lifetime(stop, supervisor_pid), DailyHost() as host:
+        deadline = time.monotonic() + duration if resident and duration else None
+        may_launch = not resident or launch_once
+        announced = None
+        while not stop[0] and (deadline is None or time.monotonic() < deadline):
             try:
-                endpoint = host.launch_or_attach()
-                break
+                endpoint = host.launch_or_attach(allow_launch=may_launch,
+                                                cancelled=lambda: stop[0])
             except HostError as error:
-                if str(error) != 'daily_instance_running' or not wait_for_exit:
+                # A failed post-spawn validation may leave the user's app alive.
+                # That attempted launch still consumes the one-shot request.
+                if resident and isinstance(host.last_launch_failure, dict):
+                    may_launch = False
+                if str(error) != 'daily_instance_running' or not (wait_for_exit or resident):
                     raise
-                if not announced_wait:
-                    print('日常 Codex 正在运行。请先保存工作并用 Cmd-Q 正常退出；本启动器会等待，然后使用原账号、历史和项目重新打开。不会强制结束任务。', flush=True)
-                    announced_wait = True
+                state = 'waiting-for-quit' if may_launch else 'needs-launcher'
+                if state != announced:
+                    if resident:
+                        print('codex-usage-bar-resident:' + state, flush=True)
+                    if may_launch:
+                        print('日常 Codex 正在运行。请先保存工作并用 Cmd-Q 正常退出；本启动器会等待，然后使用原账号、历史和项目重新打开。不会强制结束任务。', flush=True)
+                    announced = state
                 time.sleep(1)
-        if endpoint is None:
-            print('已取消等待；日常 Codex 未改变。', flush=True)
-            return
-
-        renderers = executor = future = None
-        cleanup_failed = False
-        try:
-            renderers = RendererCollection(endpoint.port, host.validate, assets)
-            bridge = QuotaBridge(CodexQuotaClient(codex_home=host.quota_home))
-            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='quota')
-            print('日常额度条管理器已启动。会在兼容的首页和会话输入框上方显示；支持多窗口与页面重载。Ctrl-C 仅关闭信息栏，Cmd-Q 退出 Codex。', flush=True)
-            deadline = time.monotonic() + duration if duration else None
-            next_refresh = next_heartbeat = 0.0
-            previous_layout = None
-            while not stop[0] and (deadline is None or time.monotonic() < deadline):
-                if not host.is_running():
+                continue
+            if endpoint is None:
+                if stop[0]:
                     break
-                now = time.monotonic()
-                if future is not None and future.done():
+                # No endpoint means observer mode found no running managed app.
+                # Even a previous managed exit or an ordinary app disappearing
+                # cannot turn observation into permission to spawn.
+                if announced != 'waiting':
+                    print('codex-usage-bar-resident:waiting', flush=True)
+                    announced = 'waiting'
+                time.sleep(1)
+                continue
+            # A request is consumed when it attaches OR launches once. It never
+            # survives a managed app exit or grants authority to later retries.
+            may_launch = False
+            announced = None
+            remaining = max(.001, deadline - time.monotonic()) if deadline is not None else duration
+            _run_daily_session(host, endpoint, assets, stop, duration=remaining, resident=resident)
+            if not resident or stop[0] or (deadline is not None and time.monotonic() >= deadline):
+                return
+            time.sleep(.2)
+        if not resident:
+            print('已取消等待；日常 Codex 未改变。', flush=True)
+
+
+def _run_daily_session(host, endpoint, assets, stop, *, duration=0, resident=False):
+    """One verified host generation, including its exact cleanup boundary."""
+    renderers = executor = future = None
+    cleanup_failed = False
+    try:
+        renderers = RendererCollection(endpoint.port, host.validate, assets,
+                                       recovery_seed=host.recovery_seed())
+        bridge = QuotaBridge(CodexQuotaClient(codex_home=host.quota_home))
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='quota')
+        if resident:
+            print('codex-usage-bar-resident:attached', flush=True)
+        print('日常额度条管理器已启动。会在兼容的首页和会话输入框上方显示；支持多窗口与页面重载。Ctrl-C 仅关闭信息栏，Cmd-Q 退出 Codex。', flush=True)
+        deadline = time.monotonic() + duration if duration else None
+        next_refresh = next_heartbeat = 0.0
+        quota_failures = 0
+        previous_layout = None
+        while not stop[0] and (deadline is None or time.monotonic() < deadline):
+            if not host.is_running():
+                break
+            now = time.monotonic()
+            if future is not None and future.done():
+                try:
                     future.result()
-                    future = None
+                except (HostError, CDPError, ManagerError):
+                    # Ownership/transport safety failures are never quota retries.
+                    raise
+                except Exception:
+                    if not resident:
+                        raise
+                    quota_failures = min(quota_failures + 1, 5)
+                    print('codex-usage-bar-resident:quota-retrying', flush=True)
+                    next_refresh = now + min(60, 5 * 2 ** (quota_failures - 1))
+                else:
+                    if quota_failures:
+                        print('codex-usage-bar-resident:attached', flush=True)
+                        previous_layout = None
+                    quota_failures = 0
                     next_refresh = now + 60
-                    next_heartbeat = 0.0
-                if future is None and now >= next_refresh:
-                    future = executor.submit(bridge.refresh)
-                if now >= next_heartbeat:
-                    try:
-                        layout = renderers.sync(bridge.snapshot(), now=now)
-                    except CDPError:
-                        # Closed transports and changing window inventories are
-                        # retried on the next heartbeat, never in a tight loop.
-                        layout = {'mounted': 0, 'visible': 0, 'unavailable': 1}
-                    state = (layout.get('mounted'), layout.get('visible'), layout.get('unavailable'))
-                    if state != previous_layout:
-                        print('额度条已在 %d 个窗口显示；%d 个窗口等待恢复。' % (state[1], state[2])
-                              if state[1] else '等待兼容的输入框或窗口恢复；不读取对话或输入正文。', flush=True)
-                        previous_layout = state
-                    next_heartbeat = time.monotonic() + 5
-                time.sleep(.2)
-        except (CDPError, HostError, ManagerError) as original_error:
-            # Closing the app is a normal end to daily mode, not a reason to
-            # signal any process or classify a closed renderer as a leak.
+                future = None
+                next_heartbeat = 0.0
+            if future is None and now >= next_refresh:
+                future = executor.submit(bridge.refresh)
+            if now >= next_heartbeat:
+                try:
+                    # An unexpected refresh exception cannot leave old account
+                    # data displayed as fresh. Hide it until a complete read succeeds.
+                    snapshot = ({'status': 'read_failed', 'limits': {}} if quota_failures
+                                else bridge.snapshot())
+                    layout = renderers.sync(snapshot, now=now)
+                except CDPError:
+                    # Closed transports and changing window inventories are
+                    # retried on the next heartbeat, never in a tight loop.
+                    layout = {'mounted': 0, 'visible': 0, 'unavailable': 1}
+                state = (layout.get('mounted'), layout.get('visible'), layout.get('unavailable'))
+                if state != previous_layout:
+                    print('额度条已在 %d 个窗口显示；%d 个窗口等待恢复。' % (state[1], state[2])
+                          if state[1] else '等待兼容的输入框或窗口恢复；不读取对话或输入正文。', flush=True)
+                    previous_layout = state
+                next_heartbeat = time.monotonic() + 5
+            time.sleep(.2)
+    except (CDPError, HostError, ManagerError) as original_error:
+        # Closing the app is a normal end to daily mode, not a reason to
+        # signal any process or classify a closed renderer as a leak.
+        try:
+            still_running = host.is_running()
+        except Exception:
+            raise original_error from None
+        if still_running:
+            raise
+    finally:
+        original_failure = sys.exc_info()[0] is not None
+        renderer_failed = False
+        result = None
+        try:
+            still_running = host.is_running()
+        except Exception:
+            still_running = None
+            cleanup_failed = True
+        if renderers is not None and still_running is True:
             try:
-                still_running = host.is_running()
+                renderers.dispose()
             except Exception:
-                raise original_error from None
-            if still_running:
-                raise
-        finally:
-            original_failure = sys.exc_info()[0] is not None
-            renderer_failed = False
-            result = None
+                renderer_failed = True
+        if renderers is not None:
             try:
-                still_running = host.is_running()
-            except Exception:
-                still_running = None
-                cleanup_failed = True
-            if renderers is not None and still_running is True:
-                try:
-                    renderers.dispose()
-                except Exception:
-                    renderer_failed = True
-            if renderers is not None:
-                try:
-                    renderers.close()
-                except Exception:
-                    cleanup_failed = True
-            if executor is not None:
-                try:
-                    executor.shutdown(wait=True, cancel_futures=True)
-                except Exception:
-                    cleanup_failed = True
-            try:
-                result = host.detach()
+                renderers.close()
             except Exception:
                 cleanup_failed = True
-            # Cmd-Q can race with dispose; a confirmed stopped app has no live
-            # renderer to remove. Unknown/orphaned state remains a failure.
-            if renderer_failed and not (result and result.get('status') == 'stopped'
-                                       and result.get('ownedProcessCount') == 0
-                                       and result.get('debugPortOpen') is False):
+        if executor is not None:
+            try:
+                executor.shutdown(wait=True, cancel_futures=True)
+            except Exception:
                 cleanup_failed = True
-            if result and result.get('appLeftRunning'):
-                print('信息栏管理器已断开；日常 Codex 继续运行。要关闭本地调试端口，请正常退出 Codex（Cmd-Q）。', flush=True)
-            elif result and result.get('status') == 'stopped':
-                print('日常 Codex 已退出，信息栏管理器结束。', flush=True)
-            if cleanup_failed:
-                print('信息栏清理未完全确认；未强制结束日常 Codex。请正常退出 Codex 后重新启动信息栏。', file=sys.stderr)
-                if not original_failure:
-                    raise ManagerError('daily_renderer_cleanup_unverified')
+        try:
+            result = host.detach()
+        except Exception:
+            cleanup_failed = True
+        # Cmd-Q can race with dispose; a confirmed stopped app has no live
+        # renderer to remove. Unknown/orphaned state remains a failure.
+        if renderer_failed and not (result and result.get('status') == 'stopped'
+                                   and result.get('ownedProcessCount') == 0
+                                   and result.get('debugPortOpen') is False):
+            cleanup_failed = True
+        if result and result.get('appLeftRunning'):
+            print('信息栏管理器已断开；日常 Codex 继续运行。要关闭本地调试端口，请正常退出 Codex（Cmd-Q）。', flush=True)
+        elif not resident and result and result.get('status') == 'stopped':
+            print('日常 Codex 已退出，信息栏管理器结束。', flush=True)
+        if cleanup_failed:
+            print('信息栏清理未完全确认；未强制结束日常 Codex。请正常退出 Codex 后重新启动信息栏。', file=sys.stderr)
+            if not original_failure:
+                raise ManagerError('daily_renderer_cleanup_unverified')
 
 
 def main(argv=None):
@@ -546,6 +654,12 @@ def main(argv=None):
                         help='仅复用已批准的前次专用测试资料；不接受任意目录或复制凭据。')
     parser.add_argument('--wait-for-exit', action='store_true',
                         help='仅日常模式：等待已运行的 Codex 被本人正常退出，再启动信息栏版本。')
+    parser.add_argument('--resident', action='store_true',
+                        help='仅日常模式：后台观察并附加已启用实例；Codex 退出后保持关闭。')
+    parser.add_argument('--launch-once', action='store_true',
+                        help='仅与 --resident 共用：明确请求打开 Codex 一次，之后只观察。')
+    parser.add_argument('--supervisor-pid', type=int,
+                        help='仅由原生常驻伴侣传入其进程标识；伴侣终止时安全释放管理器。')
     args = parser.parse_args(argv)
     if args.duration < 0 or args.duration > 86400:
         parser.error('duration must be 0..86400')
@@ -553,11 +667,19 @@ def main(argv=None):
         parser.error('实际运行需先获批准，再显式传 --acknowledge-runtime')
     if args.wait_for_exit and args.command != 'daily':
         parser.error('--wait-for-exit is only available for daily')
+    if args.resident and args.command != 'daily':
+        parser.error('--resident is only available for daily')
+    if args.launch_once and not args.resident:
+        parser.error('--launch-once requires --resident')
+    if args.supervisor_pid is not None and (not args.resident or
+            not 2 <= args.supervisor_pid <= 2147483647):
+        parser.error('--supervisor-pid requires --resident and a valid process ID')
     if args.reuse_approved_profile and args.command in ('daily', 'daily-status'):
         parser.error('daily mode always uses the existing everyday profile')
     try:
         if args.command == 'daily':
-            run_daily(duration=args.duration, wait_for_exit=args.wait_for_exit)
+            run_daily(duration=args.duration, wait_for_exit=args.wait_for_exit, resident=args.resident,
+                      supervisor_pid=args.supervisor_pid, launch_once=args.launch_once)
         elif args.command == 'daily-status':
             with DailyHost() as host:
                 result = host.status()

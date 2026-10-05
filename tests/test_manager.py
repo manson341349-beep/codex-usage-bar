@@ -1,16 +1,23 @@
 """Offline orchestration and isolated JS ownership fixtures; never connects to Codex."""
 import hashlib
+from concurrent.futures import Future
+import fcntl
 import json
+import os
 from pathlib import Path
+import selectors
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch, MagicMock
 
 from codex_bar.manager import (ASSET_NAMES, ASSET_LIMITS, BRIDGE_KEY, ManagerError, Renderer, main,
-                               read_assets, install_expression, run_foreground, run_daily, RendererCollection)
+                               read_assets, install_expression, recovery_token,
+                               run_foreground, run_daily, supervisor_lifetime, RendererCollection)
 from codex_bar.host import HostError
 from codex_bar.cdp import CDPError
 
@@ -312,6 +319,39 @@ class ManagerTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('node'), 'Node.js is required for isolated export ownership fixtures')
 class ExportOwnershipTests(unittest.TestCase):
+    def test_hard_crash_bridge_reused_only_by_same_host_and_target_token(self):
+        assets = {
+            'sprig.js': 'window.CodexUsageBarSprig={mount(){}};',
+            'bar.js': 'window.CodexUsageBar={mount(){}};',
+            'adaptive.js': 'window.CodexUsageBarAdapter={install(){installs++;return {dispose(){}}}};',
+            'bar.css': '/* fixture */',
+        }
+        # Serialize just as a fresh process reads the private host record.
+        seed = json.loads(json.dumps({'recoverySeed': 'a' * 64}))['recoverySeed']
+        expressions = [install_expression(assets, recovery_token(value, target), home_only=False)
+                       for value, target in [(seed, 'page-one'), (seed, 'page-one'),
+                                             ('b' * 64, 'page-one'), (seed, 'page-two')]]
+        script = '''
+          const vm=require('node:vm'), assert=require('node:assert/strict');
+          const c=vm.createContext({window:{},location:{protocol:'app:',host:'-'},installs:0});
+          const code=EXPRESSIONS;
+          assert.equal(vm.runInContext(code[0],c).installed,true);
+          // No dispose: the old manager is gone, its bridge is still alive.
+          const recovered=vm.runInContext(code[1],c);
+          assert.equal(recovered.installed,true);assert.equal(recovered.reused,true);
+          assert.equal(c.installs,1);
+          for(const other of code.slice(2)) {
+            const denied=vm.runInContext(other,c);
+            assert.equal(denied.installed,false);assert.equal(denied.reason,'existing-information-bar');
+          }
+          assert.equal(c.installs,1);
+          console.log('recovery fixture passed');
+        '''.replace('EXPRESSIONS', json.dumps(expressions))
+        result = subprocess.run([shutil.which('node'), '-e', script],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'recovery fixture passed')
+
     def run_javascript(self, assertions, *, overrides=None):
         assets = {
             'sprig.js': 'order.push("sprig");window.CodexUsageBarSprig={mount(){}};',
@@ -440,6 +480,27 @@ class RendererCollectionTests(unittest.TestCase):
             self.assertFalse(renderer.home_only)
             renderer.update.assert_called_once_with(snapshot)
         self.connect.assert_called_once()
+
+    def test_new_collection_recovers_same_per_page_tokens_from_verified_host_seed(self):
+        first = RendererCollection(12345, lambda: True, {}, recovery_seed='a' * 64)
+        first.sync({}, now=0)
+        original = {key: value['token'] for key, value in first.targets.items()}
+        restored = RendererCollection(12345, lambda: True, {}, recovery_seed='a' * 64)
+        restored.sync({}, now=5)
+        self.assertEqual({key: value['token'] for key, value in restored.targets.items()}, original)
+        new_host = RendererCollection(12345, lambda: True, {}, recovery_seed='b' * 64)
+        new_host.sync({}, now=5)
+        for key in original:
+            self.assertNotEqual(new_host.targets[key]['token'], original[key])
+
+    def test_invalid_recovery_identity_refuses_before_connection(self):
+        for seed in (None, True, 1, '', 'z' * 64, 'a' * 63, 'a' * 65):
+            with self.subTest(seed=seed), self.assertRaisesRegex(ManagerError, 'recovery_identity'):
+                recovery_token(seed, 'page')
+        for target in ('', 'a' * 257, 'page\n', '../page', '页面', None):
+            with self.subTest(target=target), self.assertRaisesRegex(ManagerError, 'recovery_identity'):
+                recovery_token('a' * 64, target)
+        self.connect.assert_not_called()
 
     def test_locale_follows_focused_page_then_visible_page_and_emits_only_changes(self):
         self.collection.sync({}, now=0)
@@ -686,6 +747,7 @@ class DailyManagerTests(unittest.TestCase):
         self.host.__enter__.return_value = self.host
         self.host.quota_home = Path('/fixture/.codex')
         self.host.launch_or_attach.return_value = SimpleNamespace(port=12345)
+        self.host.recovery_seed.return_value = 'a' * 64
         self.host.is_running.return_value = True
         self.host.detach.return_value = {'appLeftRunning': True}
 
@@ -787,10 +849,265 @@ class DailyManagerTests(unittest.TestCase):
 
     def test_daily_ack_and_mixed_profile_flags_are_rejected_before_actions(self):
         for args in (['daily'], ['daily', '--acknowledge-runtime', '--reuse-approved-profile'],
-                     ['status', '--wait-for-exit']):
+                     ['status', '--wait-for-exit'], ['status', '--resident'],
+                     ['run', '--acknowledge-runtime', '--resident'], ['daily', '--resident'],
+                     ['daily', '--acknowledge-runtime', '--supervisor-pid', '123'],
+                     ['daily', '--acknowledge-runtime', '--launch-once'],
+                     ['daily', '--resident', '--acknowledge-runtime', '--supervisor-pid', '1'],
+                     ['daily', '--resident', '--acknowledge-runtime', '--supervisor-pid', '2147483648']):
             with patch('codex_bar.manager.DailyHost') as host, patch('sys.stderr'), self.assertRaises(SystemExit):
                 main(args)
             host.assert_not_called()
+
+    def test_resident_cli_dispatches_into_live_loop_entrypoint(self):
+        with patch('codex_bar.manager.run_daily') as run:
+            self.assertEqual(main(['daily', '--resident', '--acknowledge-runtime', '--duration', '9']), 0)
+        run.assert_called_once_with(duration=9, wait_for_exit=False, resident=True, supervisor_pid=None, launch_once=False)
+
+    def test_supervised_cli_passes_identity_to_real_entrypoint(self):
+        with patch('codex_bar.manager.run_daily') as run:
+            self.assertEqual(main(['daily', '--resident', '--acknowledge-runtime',
+                                   '--supervisor-pid', '12345']), 0)
+        run.assert_called_once_with(duration=0, wait_for_exit=False, resident=True, supervisor_pid=12345, launch_once=False)
+
+    def test_explicit_launch_once_cli_passes_only_the_requested_permission(self):
+        with patch('codex_bar.manager.run_daily') as run:
+            self.assertEqual(main(['daily', '--resident', '--acknowledge-runtime', '--launch-once']), 0)
+        run.assert_called_once_with(duration=0, wait_for_exit=False, resident=True,
+                                    supervisor_pid=None, launch_once=True)
+
+    def test_wrong_supervisor_rejected_before_manager_lock(self):
+        with patch('codex_bar.manager.os.getppid', return_value=321), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.DailyHost') as host, \
+             self.assertRaisesRegex(ManagerError, 'invalid_supervisor_identity'):
+            run_daily(resident=True, supervisor_pid=123)
+        host.assert_not_called()
+
+    def test_supervisor_loss_is_latched_and_pid_reappearance_does_not_resume(self):
+        stop, parent = [False], [123]
+        with patch('codex_bar.manager.os.getppid', side_effect=lambda: parent[0]):
+            with supervisor_lifetime(stop, 123):
+                parent[0] = 1
+                deadline = time.monotonic() + 1
+                while not stop[0] and time.monotonic() < deadline:
+                    time.sleep(.01)
+                self.assertTrue(stop[0])
+                parent[0] = 123
+                time.sleep(.25)
+                self.assertTrue(stop[0])
+
+    def test_resident_observer_never_grants_launch_permission(self):
+        clock = [0.0]
+        self.host.launch_or_attach.return_value = None
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager._run_daily_session') as session, \
+             patch('codex_bar.manager.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('codex_bar.manager.time.sleep', side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             patch('builtins.print') as output:
+            run_daily(resident=True, duration=3)
+        self.assertEqual(self.host.launch_or_attach.call_count, 3)
+        self.assertTrue(all(call.kwargs['allow_launch'] is False
+                            for call in self.host.launch_or_attach.call_args_list))
+        session.assert_not_called()
+        self.assertEqual([call.args[0] for call in output.call_args_list],
+                         ['codex-usage-bar-resident:waiting'])
+
+    def test_resident_launch_once_is_consumed_after_one_session(self):
+        clock = [0.0]
+        endpoints = iter([SimpleNamespace(port=12345)])
+        self.host.launch_or_attach.side_effect = lambda **_: next(endpoints, None)
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager._run_daily_session') as session, \
+             patch('codex_bar.manager.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('codex_bar.manager.time.sleep', side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             patch('builtins.print') as output:
+            run_daily(resident=True, launch_once=True, duration=3)
+        attempts = self.host.launch_or_attach.call_args_list
+        self.assertIs(attempts[0].kwargs['allow_launch'], True)
+        self.assertGreater(len(attempts), 1)
+        self.assertTrue(all(call.kwargs['allow_launch'] is False for call in attempts[1:]))
+        session.assert_called_once()
+        self.assertEqual([call.args[0] for call in output.call_args_list],
+                         ['codex-usage-bar-resident:waiting'])
+
+    def test_launch_once_failed_after_spawn_cannot_grant_another_launch(self):
+        clock, attempts = [0.0], []
+        self.host.last_launch_failure = None
+        def attach(*, allow_launch, cancelled):
+            attempts.append(allow_launch)
+            if len(attempts) == 1:
+                self.host.last_launch_failure = {'status': 'daily_launch_failed_app_not_stopped'}
+                raise HostError('daily_instance_running')
+            return None
+        self.host.launch_or_attach.side_effect = attach
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager._run_daily_session') as session, \
+             patch('codex_bar.manager.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('codex_bar.manager.time.sleep', side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             patch('builtins.print') as output:
+            run_daily(resident=True, launch_once=True, duration=3)
+        self.assertEqual(attempts, [True, False, False])
+        session.assert_not_called()
+        self.assertEqual([call.args[0] for call in output.call_args_list],
+                         ['codex-usage-bar-resident:needs-launcher', 'codex-usage-bar-resident:waiting'])
+
+    def test_stop_during_resident_idle_wait_does_not_launch(self):
+        stop = [False]
+        self.host.launch_or_attach.return_value = None
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager._run_daily_session') as session, \
+             patch('codex_bar.manager.stop_signals') as signals, \
+             patch('codex_bar.manager.time.sleep', side_effect=lambda _: stop.__setitem__(0, True)), \
+             patch('builtins.print'):
+            signals.return_value.__enter__.return_value = stop
+            run_daily(resident=True)
+        self.host.launch_or_attach.assert_called_once()
+        self.assertIs(self.host.launch_or_attach.call_args.kwargs['allow_launch'], False)
+        self.assertTrue(self.host.launch_or_attach.call_args.kwargs['cancelled']())
+        session.assert_not_called()
+        self.host.stop.assert_not_called()
+
+    def test_resident_quota_exception_hides_old_values_then_recovers_without_restarting(self):
+        clock = [0.0]
+        failed, succeeded = Future(), Future()
+        failed.set_exception(RuntimeError('PRIVATE_ERROR_PAYLOAD'))
+        succeeded.set_result({'status': 'fresh'})
+        worker = MagicMock()
+        worker.submit.side_effect = [failed, succeeded]
+        collection = MagicMock()
+        collection.sync.return_value = {'mounted': 1, 'visible': 1, 'unavailable': 0}
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.RendererCollection', return_value=collection), \
+             patch('codex_bar.manager.CodexQuotaClient'), \
+             patch('codex_bar.manager.QuotaBridge') as bridge, \
+             patch('codex_bar.manager.ThreadPoolExecutor', return_value=worker), \
+             patch('codex_bar.manager.time.monotonic', side_effect=lambda: clock[0]), \
+             patch('codex_bar.manager.time.sleep', side_effect=lambda s: clock.__setitem__(0, clock[0] + s)), \
+             patch('builtins.print') as output:
+            bridge.return_value.snapshot.return_value = {'status': 'fresh', 'limits': {'fixture': 4}}
+            run_daily(duration=7, resident=True)
+        self.assertEqual(worker.submit.call_count, 2)
+        snapshots = [call.args[0] for call in collection.sync.call_args_list]
+        self.assertIn({'status': 'read_failed', 'limits': {}}, snapshots)
+        self.assertEqual(snapshots[-1]['status'], 'fresh')
+        messages = [call.args[0] for call in output.call_args_list]
+        self.assertIn('codex-usage-bar-resident:quota-retrying', messages)
+        self.assertEqual(messages.count('codex-usage-bar-resident:attached'), 2)
+        recovered = max(index for index, message in enumerate(messages)
+                        if message == 'codex-usage-bar-resident:attached')
+        self.assertTrue(messages[recovered + 1].startswith('额度条已在 1 个窗口显示；'),
+                        'quota recovery must restore the native visible status after attached')
+        self.assertNotIn('PRIVATE_ERROR_PAYLOAD', str(messages))
+        self.host.launch_or_attach.assert_called_once()
+        collection.dispose.assert_called_once()
+
+    def test_resident_identity_error_is_not_retried_as_quota_or_reopen(self):
+        self.host.recovery_seed.side_effect = HostError('owned_command_mismatch')
+        with patch('codex_bar.manager.DailyHost', return_value=self.host), \
+             patch('codex_bar.manager.read_assets', return_value={}), \
+             patch('codex_bar.manager.ThreadPoolExecutor') as worker, \
+             patch('builtins.print') as output, \
+             self.assertRaisesRegex(HostError, 'owned_command_mismatch'):
+            run_daily(resident=True)
+        self.host.launch_or_attach.assert_called_once()
+        worker.assert_not_called()
+        messages = [call.args[0] for call in output.call_args_list]
+        self.assertNotIn('codex-usage-bar-resident:reopening', messages)
+        self.assertNotIn('codex-usage-bar-resident:quota-retrying', messages)
+
+    def test_killed_dummy_supervisor_releases_real_manager_lock_without_codex(self):
+        # The production resident loop, lifetime watcher and DailyHost lock are
+        # real. Only Codex/transport/quota operations are replaced by fixtures.
+        # An unsupervised control proves this is not an OS process-group cleanup.
+        child_source = r'''
+import os, sys
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+from codex_bar.daily_host import DailyHost
+from codex_bar.manager import run_daily
+host = object.__new__(DailyHost)
+host.state_root = Path(sys.argv[1])
+host._lock_fd = None
+host.quota_home = host.state_root / 'unused-quota'
+host.launch_or_attach = lambda **options: SimpleNamespace(port=12345)
+host.recovery_seed = lambda: 'a' * 64
+host.validate = lambda: True
+host.is_running = lambda: True
+host.detach = lambda: {'appLeftRunning': True}
+worker = MagicMock()
+worker.submit.return_value.done.return_value = False
+collection = MagicMock()
+def sync(*args, **kwargs):
+    print('FIXTURE_MANAGER_READY', flush=True)
+    return {'mounted': 1, 'visible': 1, 'unavailable': 0}
+collection.sync.side_effect = sync
+with patch('codex_bar.manager.DailyHost', return_value=host), \
+     patch('codex_bar.manager.read_assets', return_value={}), \
+     patch('codex_bar.manager.RendererCollection', return_value=collection), \
+     patch('codex_bar.manager.CodexQuotaClient'), \
+     patch('codex_bar.manager.QuotaBridge'), \
+     patch('codex_bar.manager.ThreadPoolExecutor', return_value=worker):
+    run_daily(resident=True, duration=3,
+              supervisor_pid=int(sys.argv[2]) if sys.argv[3] == 'supervised' else None)
+assert host._lock_fd is None
+assert collection.dispose.call_count == 1
+print('FIXTURE_MANAGER_EXITED', flush=True)
+'''
+        parent_source = ('import os, subprocess, sys, time\n'
+                         'subprocess.Popen([sys.executable,"-B","-c",' + repr(child_source) +
+                         ',sys.argv[1],str(os.getpid()),sys.argv[2]])\n'
+                         'time.sleep(6)\n')
+        for supervised in (False, True):
+            with self.subTest(supervised=supervised), tempfile.TemporaryDirectory() as root:
+                parent = subprocess.Popen([sys.executable, '-B', '-c', parent_source, root,
+                                           'supervised' if supervised else 'control'],
+                                          cwd=Path(__file__).resolve().parents[1],
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                          start_new_session=True)
+                selector = selectors.DefaultSelector()
+                selector.register(parent.stdout, selectors.EVENT_READ)
+                observed = b''
+                try:
+                    deadline = time.monotonic() + 5
+                    while b'FIXTURE_MANAGER_READY' not in observed and time.monotonic() < deadline:
+                        if selector.select(.1):
+                            data = os.read(parent.stdout.fileno(), 4096)
+                            if not data:
+                                break
+                            observed += data
+                    self.assertIn(b'FIXTURE_MANAGER_READY', observed)
+                    with open(Path(root) / 'manager.lock', 'r+b') as lock:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        parent.kill()  # Positive PID of this test's own dummy parent.
+                        parent.wait(timeout=3)
+                        deadline = time.monotonic() + (1.5 if supervised else .5)
+                        released = False
+                        while time.monotonic() < deadline:
+                            try:
+                                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                released = True
+                                fcntl.flock(lock, fcntl.LOCK_UN)
+                                break
+                            except BlockingIOError:
+                                time.sleep(.02)
+                        self.assertEqual(released, supervised)
+                    tail, _ = parent.communicate(timeout=5)
+                    self.assertIn(b'FIXTURE_MANAGER_EXITED', observed + tail)
+                finally:
+                    selector.close()
+                    if parent.poll() is None:
+                        parent.kill()
+                    # Dummy child has a three-second deadline even on assertion
+                    # failure; no unrelated PID or process group is signalled.
+                    parent.communicate(timeout=5)
 
     def test_liveness_failure_cannot_skip_transport_worker_or_host_cleanup(self):
         self.host.is_running.side_effect = HostError('process_inspection_failed')

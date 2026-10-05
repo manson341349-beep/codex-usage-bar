@@ -191,15 +191,25 @@ class PackagingTests(unittest.TestCase):
                           '"userSiteDisabled": sys.flags.no_user_site, '
                           '"bytecodeDisabled": sys.dont_write_bytecode, '
                           '"correctWorkingDirectory": Path.cwd() == Path(__file__).resolve().parent.parent}))\n')
-        commands = {
-            'Start.command': ['daily', '--acknowledge-runtime', '--wait-for-exit'],
-            'Test.command': ['run', '--acknowledge-runtime', '--duration', '0'],
-        }
-        for name, expected in commands.items():
-            with self.subTest(command=name):
+        commands = [
+            ('Start.command', [], ['daily', '--acknowledge-runtime', '--wait-for-exit']),
+            ('Start.command', ['--resident'],
+             ['daily', '--acknowledge-runtime', '--wait-for-exit', '--resident']),
+            ('Start.command', ['--resident', '--supervisor-pid', '12345'],
+             ['daily', '--acknowledge-runtime', '--wait-for-exit', '--resident',
+              '--supervisor-pid', '12345']),
+            ('Start.command', ['--resident', '--launch-once'],
+             ['daily', '--acknowledge-runtime', '--wait-for-exit', '--resident', '--launch-once']),
+            ('Start.command', ['--resident', '--launch-once', '--supervisor-pid', '12345'],
+             ['daily', '--acknowledge-runtime', '--wait-for-exit', '--resident', '--launch-once',
+              '--supervisor-pid', '12345']),
+            ('Test.command', [], ['run', '--acknowledge-runtime', '--duration', '0']),
+        ]
+        for name, arguments, expected in commands:
+            with self.subTest(command=name, arguments=arguments):
                 script = self.source / 'platforms/macos' / name
                 script.write_bytes((MACOS / name).read_bytes())
-                result = subprocess.run([shutil.which('zsh'), str(script)],
+                result = subprocess.run([shutil.which('zsh'), str(script), *arguments],
                                         text=True, capture_output=True, timeout=15)
                 if result.returncode and 'Python 3.12 or later is required.' in result.stderr:
                     self.skipTest('No launcher-supported Python 3.12+ location on this test host')
@@ -209,6 +219,20 @@ class PackagingTests(unittest.TestCase):
                 for flag in ('environmentIgnored', 'userSiteDisabled', 'bytecodeDisabled',
                              'correctWorkingDirectory'):
                     self.assertTrue(output[flag], flag)
+        for arguments in (['--unknown'], ['--resident', '--unknown'], ['--resident', '--resident'],
+                          ['--resident', '--supervisor-pid'],
+                          ['--resident', '--supervisor-pid', '1'],
+                          ['--resident', '--supervisor-pid', '2147483648'],
+                          ['--resident', '--supervisor-pid', 'not-a-pid'],
+                          ['--resident', '--supervisor-pid', '12345', '--unknown'],
+                          ['--launch-once'], ['--resident', '--launch-once', '--launch-once'],
+                          ['--resident', '--supervisor-pid', '12345', '--launch-once']):
+            with self.subTest(rejected=arguments):
+                result = subprocess.run([shutil.which('zsh'),
+                                         str(self.source / 'platforms/macos/Start.command'), *arguments],
+                                        text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('correctWorkingDirectory', result.stdout)
         self.assertFalse(list(self.source.rglob('*.pyc')))
 
     def test_package_version_is_shared_by_bundle_and_manifest(self):
@@ -306,7 +330,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIsNone(result['backupPath'])
         self.assertEqual(stat.S_IMODE(self.installer.support.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.installer.receipt_path.stat().st_mode), 0o600)
-        self.assertEqual(self.installer.existing_receipt(), self.make_receipt())
+        self.assertEqual(self.installer.existing_receipt(),
+                         {**self.make_receipt(), 'buildSourceRoot': str(self.source)})
         self.assertFalse((self.installer.support / 'private-session').exists())
         self.assertFalse(list(self.installer.app.rglob('install.json')))
 
@@ -320,6 +345,115 @@ class PackagingTests(unittest.TestCase):
         backup = Path(result['backupPath'])
         self.assertEqual((backup / 'Contents/Resources/codex-usage-bar/web/bar.js').read_bytes(), old_content)
         self.assertEqual(old_asset.read_text(), 'new release')
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin atomic directory exchange')
+    def test_atomic_upgrade_replaces_payload_without_retained_backup(self):
+        self.installer.install()
+        (self.source / 'web/bar.js').write_text('new resident fixture\n')
+        result = self.installer.install(replace_existing=True)
+        self.assertIsNone(result['backupPath'])
+        self.assertFalse(self.installer.backups.exists())
+        self.assertEqual((self.installer.app / 'Contents/Resources/codex-usage-bar/web/bar.js')
+                         .read_text(), 'new resident fixture\n')
+        self.assertFalse(list(self.installer.applications.glob('.codex-usage-bar-install-*')))
+        install.verify_owned_app(self.installer.app)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin atomic directory exchange')
+    def test_atomic_upgrade_receipt_failure_restores_old_app(self):
+        self.installer.install()
+        payload = self.installer.app / 'Contents/Resources/codex-usage-bar/web/bar.js'
+        original = payload.read_bytes()
+        receipt = self.installer.receipt_path.read_bytes()
+        (self.source / 'web/bar.js').write_text('new resident fixture\n')
+        with patch.object(install, 'write_private_json', side_effect=OSError('fixture')):
+            with self.assertRaises(OSError):
+                self.installer.install(replace_existing=True)
+        self.assertEqual(payload.read_bytes(), original)
+        self.assertEqual(self.installer.receipt_path.read_bytes(), receipt)
+        self.assertFalse(self.installer.backups.exists())
+        self.assertFalse(list(self.installer.applications.glob('.codex-usage-bar-install-*')))
+
+    def test_atomic_upgrade_exchange_failure_preserves_installation(self):
+        self.installer.install()
+        payload = self.installer.app / 'Contents/Resources/codex-usage-bar/web/bar.js'
+        original = payload.read_bytes()
+        with patch.object(install, 'exchange_apps',
+                          side_effect=install.InstallError('atomic_app_exchange_failed')):
+            with self.assertRaisesRegex(install.InstallError, 'atomic_app_exchange_failed'):
+                self.installer.install(replace_existing=True)
+        self.assertEqual(payload.read_bytes(), original)
+        self.assertFalse(self.installer.backups.exists())
+        self.assertFalse(list(self.installer.applications.glob('.codex-usage-bar-install-*')))
+
+    def test_upgrade_rechecks_app_after_compilation(self):
+        self.installer.install()
+        original_build = install.build_app
+
+        def changed_target(*args, **kwargs):
+            result = original_build(*args, **kwargs)
+            marker = self.installer.app / 'Contents/Resources' / build.MARKER_NAME
+            marker.write_text('{"foreign":true}')
+            return result
+
+        with patch.object(install, 'build_app', side_effect=changed_target):
+            with self.assertRaisesRegex(install.InstallError, 'existing_app_identity_mismatch'):
+                self.installer.install(replace_existing=True)
+        self.assertTrue(self.installer.app.exists())
+        self.assertEqual((self.installer.app / 'Contents/Resources' / build.MARKER_NAME)
+                         .read_text(), '{"foreign":true}')
+
+    def test_upgrade_from_moved_checkout_retains_approved_profile_binding(self):
+        self.installer.install(reuse_approved_profile=True)
+        previous = self.installer.existing_receipt()
+        moved = self.root / 'moved-source'
+        self.source.rename(moved)
+        self.source = moved
+        self.installer.source = moved
+        self.installer.receipt_factory = lambda reuse: self.fail('must retain approved binding')
+        self.installer.install()
+        current = self.installer.existing_receipt()
+        for key in ('sourceRoot', 'profileRoot', 'approvedManifestPath', 'profileBinding'):
+            self.assertEqual(current[key], previous[key])
+        self.assertEqual(current['buildSourceRoot'], str(moved))
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin atomic directory exchange')
+    def test_committed_upgrade_reports_cleanup_failure_separately(self):
+        self.installer.install()
+        (self.source / 'web/bar.js').write_text('new resident fixture\n')
+        original_cleanup = shutil.rmtree
+
+        def fail_final_cleanup(path, *args, **kwargs):
+            if Path(path).name.startswith('.codex-usage-bar-install-'):
+                raise PermissionError('fixture')
+            return original_cleanup(path, *args, **kwargs)
+
+        with patch.object(install.shutil, 'rmtree', side_effect=fail_final_cleanup):
+            result = self.installer.install(replace_existing=True)
+        self.assertEqual(result['cleanupWarning']['code'], 'installed_cleanup_incomplete')
+        self.assertTrue(Path(result['cleanupWarning']['retainedStagingPath']).is_dir())
+        self.assertEqual((self.installer.app / 'Contents/Resources/codex-usage-bar/web/bar.js')
+                         .read_text(), 'new resident fixture\n')
+        self.installer.existing_receipt()
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin atomic directory exchange')
+    def test_rollback_exchange_failure_retains_original_app(self):
+        self.installer.install()
+        original_exchange = install.exchange_apps
+        calls = []
+
+        def fail_rollback(first, second):
+            calls.append((first, second))
+            if len(calls) == 2:
+                raise install.InstallError('atomic_app_exchange_failed')
+            original_exchange(first, second)
+
+        with patch.object(install, 'write_private_json', side_effect=OSError('fixture')), \
+                patch.object(install, 'exchange_apps', side_effect=fail_rollback):
+            with self.assertRaisesRegex(install.InstallError, 'atomic_app_rollback_failed'):
+                self.installer.install(replace_existing=True)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0][0].is_dir())
+        self.assertTrue(self.installer.app.is_dir())
 
     def test_uninstall_retains_profile_state_and_allows_reinstall(self):
         self.installer.install()

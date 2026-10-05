@@ -30,11 +30,13 @@ PAYLOAD_FILES = (
     'web/THREE-LICENSE.txt', 'web/asset-manifest.json',
     'platforms/macos/Launcher.swift', 'platforms/macos/Start.command',
     'platforms/macos/Test.command', 'platforms/macos/install.py',
-    'platforms/macos/build.py', 'README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
+    'platforms/macos/build.py', 'platforms/macos/resident.py',
+    'README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
     'docs/VALIDATION.md', 'README.en.md', 'docs/assets/overview.svg', 'docs/assets/overview.en.svg',
 )
 SOURCE_EXTRA_FILES = (
     '.gitignore', 'web/preview.html', 'platforms/macos/test_packaging.py',
+    'platforms/macos/test_resident.py',
     'tests/test_cdp.py', 'tests/test_host.py', 'tests/test_daily_host.py',
     'tests/test_manager.py', 'tests/test_quota.py',
     'tests/test_frontend.js', 'tests/test_sprig_runtime.js', 'tests/test_i18n.js',
