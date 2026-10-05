@@ -25,6 +25,7 @@ BRIDGE_KEY = 'codex-usage-bar.bridge.v1'
 ASSET_NAMES = ('sprig.js', 'bar.js', 'adaptive.js', 'bar.css')
 ASSET_LIMITS = {name: 2 * 1024 * 1024 if name == 'sprig.js' else 262144
                 for name in ASSET_NAMES}
+SUPPORTED_LOCALES = ('zh-CN', 'en')
 
 
 class ManagerError(RuntimeError):
@@ -139,6 +140,8 @@ class Renderer:
           const m=h.api.inspect(), l=m.layout;
           return {owned:true,accepted:accepted===true,
             mounted:!!l,visible:!!(l&&l.visible),
+            locale:m.locale==='zh-CN'||m.locale==='en'?m.locale:null,
+            focused:m.focused===true,pageVisible:m.visible===true,
             overlaps:!!(l&&l.overlapsNativeContent),
             clipped:!!(l&&l.clippedByAncestor),
             inViewport:!!(l&&l.barWithinViewport)};
@@ -151,6 +154,12 @@ class Renderer:
             raise ManagerError('renderer_update_refused')
         if result.get('mounted') and (result.get('overlaps') or result.get('clipped')):
             raise ManagerError('renderer_layout_unsafe')
+        # Locale is the only textual renderer metadata eligible for the native
+        # menu protocol. Never forward arbitrary DOM strings or truthy flags.
+        locale = result.get('locale')
+        result['locale'] = locale if type(locale) is str and locale in SUPPORTED_LOCALES else None
+        result['focused'] = result.get('focused') is True
+        result['pageVisible'] = result.get('pageVisible') is True
         return result
 
     def dispose(self):
@@ -187,6 +196,18 @@ class RendererCollection:
         self.port, self.validate, self.assets = port, validate, assets
         self.session = None
         self.targets = {}
+        self._locale = None
+
+    def _publish_locale(self, candidates):
+        if not candidates:
+            return  # Missing/hidden pages do not reset the last known language.
+        priority = max(rank for rank, _ in candidates)
+        languages = [locale for rank, locale in candidates if rank == priority]
+        # Keep a stable choice when equally relevant windows disagree.
+        selected = self._locale if self._locale in languages else languages[0]
+        if selected != self._locale:
+            self._locale = selected
+            print('codex-usage-bar-locale:' + selected, flush=True)
 
     def _connect(self):
         if self.session is None or self.session.closed:
@@ -219,6 +240,7 @@ class RendererCollection:
             state = self.targets.pop(absent)
             self._detach(state)
         result = {'pages': len(ids), 'mounted': 0, 'visible': 0, 'unavailable': 0}
+        locale_candidates = []
         for index, target_id in enumerate(ids):
             state = self.targets.setdefault(target_id, {'token': secrets.token_hex(16),
                          'renderer': None, 'failures': 0, 'next_attempt': 0.0})
@@ -244,6 +266,11 @@ class RendererCollection:
                 state.update(failures=0, next_attempt=0.0)
                 result['mounted'] += int(layout.get('mounted') is True)
                 result['visible'] += int(layout.get('visible') is True)
+                locale = layout.get('locale')
+                if type(locale) is str and locale in SUPPORTED_LOCALES:
+                    rank = 2 if layout.get('focused') is True else 1 if layout.get('pageVisible') is True else 0
+                    if rank:
+                        locale_candidates.append((rank, locale))
             except (CDPError, ManagerError):
                 state['failures'] = min(state['failures'] + 1, 5)
                 state['next_attempt'] = now + min(60, 5 * 2 ** (state['failures'] - 1))
@@ -262,6 +289,7 @@ class RendererCollection:
                     # pages are preserved and reattached at the next heartbeat.
                     result['unavailable'] += len(ids) - index - 1
                     break
+        self._publish_locale(locale_candidates)
         return result
 
     def dispose(self):

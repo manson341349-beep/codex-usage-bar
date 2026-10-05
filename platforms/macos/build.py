@@ -31,13 +31,13 @@ PAYLOAD_FILES = (
     'platforms/macos/Launcher.swift', 'platforms/macos/Start.command',
     'platforms/macos/Test.command', 'platforms/macos/install.py',
     'platforms/macos/build.py', 'README.md', 'LICENSE', 'NOTICE.md', 'docs/PROVENANCE.md',
-    'docs/VALIDATION.md', 'docs/assets/overview.svg',
+    'docs/VALIDATION.md', 'README.en.md', 'docs/assets/overview.svg', 'docs/assets/overview.en.svg',
 )
 SOURCE_EXTRA_FILES = (
     '.gitignore', 'web/preview.html', 'platforms/macos/test_packaging.py',
     'tests/test_cdp.py', 'tests/test_host.py', 'tests/test_daily_host.py',
     'tests/test_manager.py', 'tests/test_quota.py',
-    'tests/test_frontend.js', 'tests/test_sprig_runtime.js',
+    'tests/test_frontend.js', 'tests/test_sprig_runtime.js', 'tests/test_i18n.js',
     'platforms/windows/README.md', '.github/workflows/ci.yml', 'scripts/validate.py',
     'web/sprig-source/runtime.js', 'web/sprig-source/character.js',
     'web/sprig-source/motion.js', 'web/vendor/three.module.js',

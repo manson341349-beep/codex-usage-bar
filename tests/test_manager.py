@@ -76,6 +76,28 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ManagerError, 'layout_unsafe'):
             self.renderer.update({})
 
+    def test_renderer_locale_metadata_is_strict_and_separate_from_bar_visibility(self):
+        for locale in ('zh-CN', 'en', 'zh', 'en-GB', 'EN', '', None, 1, True,
+                       ['en'], {'locale': 'en'}, 'en\ncodex-usage-bar-locale:zh-CN'):
+            with self.subTest(locale=locale):
+                self.session.value = {'owned': True, 'accepted': True, 'mounted': False,
+                                      'visible': False, 'locale': locale,
+                                      'focused': 'true', 'pageVisible': 1}
+                result = self.renderer.update({'locale': 'PRIVATE_UPSTREAM_LOCALE'})
+                self.assertEqual(result['locale'], locale if type(locale) is str and locale in ('zh-CN', 'en') else None)
+                self.assertIs(result['focused'], False)
+                self.assertIs(result['pageVisible'], False)
+                expression = self.session.calls[-1][1]['expression']
+                self.assertIn('focused:m.focused===true,pageVisible:m.visible===true', expression)
+                self.assertIn('visible:!!(l&&l.visible)', expression)
+                self.assertNotIn('PRIVATE_UPSTREAM_LOCALE', expression)
+        self.session.value = {'owned': True, 'accepted': True, 'mounted': False,
+                              'visible': False, 'locale': 'en', 'focused': True, 'pageVisible': True}
+        result = self.renderer.update({})
+        self.assertIs(result['focused'], True)
+        self.assertIs(result['pageVisible'], True)
+        self.assertIs(result['visible'], False)
+
     def test_missing_owner_is_failure(self):
         self.session.value = {'owned':False}
         with self.assertRaisesRegex(ManagerError, 'bridge_lost'):
@@ -418,6 +440,68 @@ class RendererCollectionTests(unittest.TestCase):
             self.assertFalse(renderer.home_only)
             renderer.update.assert_called_once_with(snapshot)
         self.connect.assert_called_once()
+
+    def test_locale_follows_focused_page_then_visible_page_and_emits_only_changes(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        first.update.return_value = {'locale': 'en', 'pageVisible': True, 'focused': False}
+        second.update.return_value = {'locale': 'zh-CN', 'pageVisible': True, 'focused': True}
+        with patch('builtins.print') as output:
+            self.collection.sync({}, now=5)
+            output.assert_called_once_with('codex-usage-bar-locale:zh-CN', flush=True)
+            self.collection.sync({}, now=10)
+            self.assertEqual(output.call_count, 1)
+            # The same focused page changes the app language in place.
+            second.update.return_value['locale'] = 'en'
+            self.collection.sync({}, now=15)
+            self.assertEqual(output.call_args.args, ('codex-usage-bar-locale:en',))
+            first.update.return_value = {'locale': 'en', 'pageVisible': False, 'focused': False}
+            second.update.return_value = {'locale': 'zh-CN', 'pageVisible': True, 'focused': False}
+            self.collection.sync({}, now=20)
+            self.assertEqual(output.call_args.args, ('codex-usage-bar-locale:zh-CN',))
+            self.assertEqual(output.call_count, 3)
+
+    def test_locale_ties_keep_known_language_and_missing_or_hidden_pages_do_not_reset_it(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        first.update.return_value = {'locale': 'en', 'pageVisible': True}
+        second.update.return_value = {'locale': 'zh-CN', 'pageVisible': True, 'focused': True}
+        with patch('builtins.print') as output:
+            self.collection.sync({}, now=5)
+            second.update.return_value['focused'] = False
+            self.collection.sync({}, now=10)
+            self.assertEqual(output.call_count, 1, 'discovery order must not override the known language on a tie')
+            first.update.return_value = {'locale': 'en', 'pageVisible': False}
+            second.update.return_value = {'locale': None, 'pageVisible': True, 'focused': True}
+            self.collection.sync({}, now=15)
+            self.session.list_codex_pages.return_value = ()
+            self.collection.sync({}, now=20)
+            self.assertEqual(output.call_count, 1)
+            self.assertEqual(self.collection._locale, 'zh-CN')
+
+    def test_invalid_locale_and_non_boolean_attention_never_reach_stdout(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        with patch('builtins.print') as output:
+            for index, value in enumerate(('en-GB', 'zh', 'zh_CN', ' en', 'en\nPRIVATE',
+                                           None, True, 1, ['en'], {'locale': 'en'})):
+                first.update.return_value = {'locale': value, 'focused': True, 'pageVisible': True}
+                second.update.return_value = {'locale': 'en', 'focused': 'true', 'pageVisible': 1}
+                self.collection.sync({}, now=5 + index * 5)
+            output.assert_not_called()
+            self.assertIsNone(self.collection._locale)
+
+    def test_unavailable_focused_page_cannot_publish_stale_locale(self):
+        self.collection.sync({}, now=0)
+        first, second = self.created
+        first.update.side_effect = CDPError('unavailable')
+        second.update.return_value = {'locale': 'en', 'pageVisible': True, 'focused': False}
+        with patch('builtins.print') as output:
+            result = self.collection.sync({}, now=5)
+            self.assertEqual(result['unavailable'], 1)
+            output.assert_called_once_with('codex-usage-bar-locale:en', flush=True)
+            self.collection.sync({}, now=6)
+            self.assertEqual(output.call_count, 1)
 
     def test_new_window_attaches_and_closed_window_does_not_interrupt_survivor(self):
         self.collection.sync({}, now=0)

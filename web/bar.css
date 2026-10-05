@@ -38,6 +38,7 @@
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   isolation: isolate;
+  container: cbu-bar / inline-size;
 }
 .cbu-bar *, .cbu-bar *::before, .cbu-bar *::after { box-sizing: border-box; }
 .cbu-bar[data-theme="dark"] {
@@ -143,6 +144,29 @@
 .cbu-source-line { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 9px; font-size: 11px; }
 .cbu-source-line dt { color: var(--cbu-muted); }
 .cbu-source-line dd { margin: 0; overflow-wrap: anywhere; line-height: 1.55; }
+/* The host can be narrow inside a wide app window: size against the bar itself.
+   Keep the 56px companion and 32px controls; reclaim spacing before reducing type. */
+@container cbu-bar (max-width: 420px) {
+  .cbu-bar:not([data-mode="compact"]) .cbu-row { column-gap: 6px; padding-left: 10px; padding-right: 10px; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-metric { padding-left: 4px; padding-right: 4px; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-metric:first-child { padding-left: 0; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-metric:last-child { padding-right: 0; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-label { white-space: normal; overflow: visible; text-overflow: clip; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-value { font-size: 20px; }
+  .cbu-bar[data-mode="compact"] .cbu-row { grid-template-columns: minmax(0, 1fr) 68px; padding-left: 8px; padding-right: 8px; column-gap: 6px; }
+  .cbu-bar[data-mode="compact"] .cbu-controls { gap: 4px; }
+  .cbu-bar[data-mode="compact"] .cbu-metrics { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.25fr); }
+  .cbu-bar[data-mode="compact"] .cbu-metric { gap: 3px; padding-left: 4px; padding-right: 4px; }
+  .cbu-bar[data-mode="compact"] .cbu-metric:first-child { padding-left: 0; }
+  .cbu-bar[data-mode="compact"] .cbu-metric:last-child { padding-right: 0; }
+}
+@container cbu-bar (max-width: 359px) {
+  .cbu-bar:not([data-mode="compact"]) .cbu-row { column-gap: 4px; padding-left: 6px; padding-right: 6px; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-metric { padding-left: 2px; padding-right: 2px; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-metric:first-child { padding-left: 0; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-metric:last-child { padding-right: 0; }
+  .cbu-bar:not([data-mode="compact"]) .cbu-value { font-size: 18px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .cbu-bar *, .cbu-bar *::before, .cbu-bar *::after { animation: none !important; transition: none !important; }
 }

@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="1020" viewBox="0 0 960 1020" role="img" aria-labelledby="title description">
-  <title id="title">codex-usage-bar · 额度抬眼可见，芽团安静相伴</title>
-  <desc id="description">面向 macOS 的独立开源 Codex 启动伴侣。在原生输入框上方查看每周剩余额度与五小时已用额度，配有原创 Sprig 3D 角色。支持本地角色互动、折叠时暂停、主题适配，不读取输入正文与聊天内容。图中所有额度为虚构示例，缓存显示等待统计。需通过本项目启动器启用，非 OpenAI 官方产品。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="960" height="1020" viewBox="0 0 960 1020" role="img" aria-labelledby="title description" xml:lang="en">
+  <title id="title">codex-usage-bar · Usage at a glance. Sprig by your side.</title>
+  <desc id="description">An independent, open-source Codex launcher companion for macOS. See weekly usage remaining and five-hour usage above the native composer, alongside the original Sprig 3D character. Local interactions, pause-on-fold, and theme integration, without reading prompts or chat content. All usage values are fictional examples; cache hit rate is waiting for statistics. Enable it through this project's launcher. Not an official OpenAI product.</desc>
   <!-- Original vector layout and icons. Sprig renders come from this project's
        web/sprig-source/character.js and motion.js; no external assets or fonts.
        MIT License — Copyright (c) 2026 codex-usage-bar contributors. -->
@@ -29,71 +29,71 @@
   <text x="907" y="61" text-anchor="end" class="muted" font-size="18" letter-spacing="1.2">v0.9.0 / macOS</text>
 
   <!-- A real render of the original companion, not a substitute concept. -->
-  <text x="52" y="170" class="ink" font-size="54" font-weight="650" letter-spacing="-1.8">额度抬眼可见。</text>
-  <text x="52" y="239" class="ink" font-size="54" font-weight="650" letter-spacing="-1.8">芽团安静相伴。</text>
-  <text x="54" y="289" class="muted" font-size="24">真实额度，就在原生输入框上方。</text>
+  <text x="52" y="170" class="ink" font-size="54" font-weight="650" letter-spacing="-1.8">Usage at a glance.</text>
+  <text x="52" y="239" class="ink" font-size="54" font-weight="650" letter-spacing="-1.8">Sprig by your side.</text>
+  <text x="54" y="289" class="muted" font-size="24">Real limits. Right above your composer.</text>
   <rect x="54" y="324" width="110" height="37" rx="18.5" fill="#e4eee0"/>
-  <text x="109" y="349" text-anchor="middle" fill="#486c51" font-size="18" font-weight="600">MIT 开源</text>
+  <text x="109" y="349" text-anchor="middle" fill="#486c51" font-size="16" font-weight="600">MIT licensed</text>
   <rect x="176" y="324" width="142" height="37" rx="18.5" fill="#fffef9" stroke="#dce5d7"/>
-  <text x="247" y="349" text-anchor="middle" fill="#486c51" font-size="18" font-weight="600">原创 3D 伙伴</text>
+  <text x="247" y="349" text-anchor="middle" fill="#486c51" font-size="18" font-weight="600">Original 3D</text>
   <use href="#sprigHello" transform="translate(582 81) scale(.51)"/>
   <g transform="translate(763 363) rotate(-5)">
     <rect x="-15" y="-15" width="139" height="40" rx="20" fill="#fffdf4" stroke="#dbe7d4"/>
     <circle cx="4" cy="5" r="4" fill="#93b99c"/>
-    <text x="17" y="11" fill="#607d61" font-size="18">Sprig · 芽团</text>
+    <text x="17" y="11" fill="#607d61" font-size="18">Sprig · 3D</text>
   </g>
 
   <!-- All values are fictional and deliberately labelled. -->
-  <text x="54" y="451" class="ink" font-size="26" font-weight="600">陪你写代码，不打断节奏。</text>
-  <text x="905" y="450" text-anchor="end" class="muted" font-size="18">界面示意 · 虚构数据</text>
+  <text x="54" y="451" class="ink" font-size="26" font-weight="600">A quiet companion while you code.</text>
+  <text x="905" y="450" text-anchor="end" class="muted" font-size="18">Illustration · Fictional values</text>
   <rect x="48" y="477" width="864" height="284" rx="29" fill="#f9fbf6" stroke="#dce5d9" filter="url(#softShadow)"/>
   <rect x="72" y="501" width="816" height="135" rx="20" fill="#fffef9" stroke="#e2e8db"/>
   <use href="#sprigIdle" transform="translate(80 506) scale(.18)"/>
-  <text x="229" y="533" fill="#67816b" font-size="20">每周剩余</text>
+  <text x="229" y="533" fill="#67816b" font-size="18">Weekly remaining</text>
   <text x="228" y="581" class="ink number" font-size="43" font-weight="650" letter-spacing="-1">72<tspan font-size="25">%</tspan></text>
   <rect x="230" y="600" width="137" height="6" rx="3" fill="#e7eddf"/>
   <rect x="230" y="600" width="99" height="6" rx="3" fill="url(#progress)"/>
   <path d="M399 528V601M571 528V601" stroke="#e9ede3"/>
-  <text x="430" y="533" fill="#67816b" font-size="20">5h 已用</text>
+  <text x="430" y="533" fill="#67816b" font-size="20">5h used</text>
   <text x="429" y="581" class="ink number" font-size="43" font-weight="650" letter-spacing="-1">18<tspan font-size="25">%</tspan></text>
   <rect x="430" y="600" width="109" height="6" rx="3" fill="#e7eddf"/>
   <rect x="430" y="600" width="20" height="6" rx="3" fill="#d9ba86"/>
-  <text x="604" y="533" fill="#67816b" font-size="20">缓存命中</text>
-  <text x="603" y="577" fill="#748672" font-size="25" font-weight="500">等待统计</text>
-  <text x="605" y="608" fill="#8b9988" font-size="16">缺少关联时显示未知</text>
+  <text x="604" y="533" fill="#67816b" font-size="20">Cache hit rate</text>
+  <text x="603" y="577" fill="#748672" font-size="24" font-weight="500">Waiting for stats</text>
+  <text x="605" y="608" fill="#8b9988" font-size="16">Unknown if unlinked</text>
   <circle cx="843" cy="540" r="13" fill="none" stroke="#93a78e" stroke-width="1.5"/>
   <text x="843" y="546" text-anchor="middle" fill="#7c9478" font-size="18" font-family="Georgia,serif" font-weight="600">i</text>
   <path d="m835 589 8-7 8 7" fill="none" stroke="#849d7e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
   <rect x="72" y="652" width="816" height="85" rx="20" fill="#f0f3ec" stroke="#dfe6d8"/>
   <path d="M101 695h16M109 687v16" class="icon" stroke="#91a089"/>
-  <text x="136" y="700" fill="#8a9783" font-size="24">给 Codex 一个任务…</text>
+  <text x="136" y="700" fill="#8a9783" font-size="24">Give Codex a task…</text>
   <circle cx="844" cy="695" r="22" fill="#294d3a"/>
   <path d="M844 704v-18m-7 7 7-7 7 7" fill="none" stroke="#eaf1e3" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- Four quiet, scannable feature columns. -->
   <g transform="translate(69 812)">
     <path d="m0 12 14-8 14 8v17l-14 8-14-8Z M0 12l14 8 14-8M14 20v17" class="icon"/>
-    <text x="0" y="77" class="ink" font-size="27" font-weight="600">本地 3D</text>
-    <text x="0" y="108" class="muted" font-size="18">注视、招呼、点击回应</text>
+    <text x="0" y="77" class="ink" font-size="27" font-weight="600">Local 3D</text>
+    <text x="0" y="108" class="muted" font-size="16">Looks, greets, responds</text>
   </g>
   <g transform="translate(282 812)">
     <rect x="0" y="5" width="29" height="30" rx="7" class="icon"/>
     <path d="M7 13h15m-15 7h15m-9 6 2 2 2-2" class="icon"/>
-    <text x="0" y="77" class="ink" font-size="27" font-weight="600">一键折叠</text>
-    <text x="0" y="108" class="muted" font-size="18">角色暂停，额度保留</text>
+    <text x="0" y="77" class="ink" font-size="27" font-weight="600">Fold away</text>
+    <text x="0" y="108" class="muted" font-size="16">Sprig rests. Usage stays.</text>
   </g>
   <g transform="translate(495 812)">
     <circle cx="15" cy="20" r="14" class="icon"/>
     <path d="M15 6a14 14 0 0 1 0 28Z" fill="#aec8aa"/>
-    <text x="0" y="77" class="ink" font-size="27" font-weight="600">跟随主题</text>
-    <text x="0" y="108" class="muted" font-size="18">融入明暗与自定义配色</text>
+    <text x="0" y="77" class="ink" font-size="27" font-weight="600">Your theme</text>
+    <text x="0" y="108" class="muted" font-size="16">Light, dark, custom colors</text>
   </g>
   <g transform="translate(708 812)">
     <path d="m15 4 14 6v11c0 9-14 16-14 16S1 30 1 21V10Z M9 20l4 4 8-9" class="icon"/>
-    <text x="0" y="77" class="ink" font-size="27" font-weight="600">不读聊天</text>
-    <text x="0" y="108" class="muted" font-size="18">不读取输入正文与历史</text>
+    <text x="0" y="77" class="ink" font-size="24" font-weight="600">No chat access</text>
+    <text x="0" y="108" class="muted" font-size="16">No prompts or chat history</text>
   </g>
   <path d="M54 951H906" stroke="#dfe7da"/>
-  <text x="54" y="984" fill="#7d8f79" font-size="17">需通过本项目启动器启用 · 独立开源项目，非 OpenAI 官方产品</text>
+  <text x="54" y="984" fill="#7d8f79" font-size="17">Use this launcher · Independent project, not an OpenAI product</text>
   <text x="906" y="984" text-anchor="end" fill="#8ea088" font-size="17">MADE WITH CARE</text>
 </svg>

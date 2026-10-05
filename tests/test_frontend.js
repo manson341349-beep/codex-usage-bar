@@ -114,6 +114,7 @@ function environment({ renderer = true, adapter = true } = {}) {
   const document = new Events();
   document.createElement = tag => new Element(tag, document);
   document.documentElement = document.createElement('html');
+  document.documentElement.setAttribute('lang', 'zh-CN');
   document.body = document.createElement('body'); document.documentElement.append(document.body);
   document.querySelectorAll = selector => document.documentElement.querySelectorAll(selector);
   document.querySelector = selector => document.documentElement.querySelector(selector);
@@ -1224,7 +1225,10 @@ test('inspection exposes no cache identity or counts and disposal releases the p
   assert.equal(inspection.cacheStatus, 'fresh');
   for (const privateValue of [CACHE_THREAD, CACHE_HOST, '987654321', '123456789',
     'inputTokens', 'cachedInputTokens', 'threadId', 'hostId']) assert.equal(serialized.includes(privateValue), false);
-  assert.deepEqual(Object.keys(inspection).sort(), ['cacheStatus', 'companion', 'homeOnly', 'layout', 'reason', 'status']);
+  assert.deepEqual(Object.keys(inspection).sort(), ['cacheStatus', 'companion', 'focused', 'homeOnly', 'layout', 'locale', 'reason', 'status', 'visible']);
+  assert.equal(inspection.locale, 'zh-CN');
+  assert.equal(typeof inspection.focused, 'boolean');
+  assert.equal(typeof inspection.visible, 'boolean');
   assert.equal(inspection.companion, null);
   api.dispose(); assert.equal(env.window.events.get('message').size, 0); assert.equal(env.window.listenerCount(), 0);
   env.window.dispatchEvent(tokenUsageEvent(100, 100)); assert.equal(env.mounted(), null);
@@ -1232,4 +1236,57 @@ test('inspection exposes no cache identity or counts and disposal releases the p
   assert.equal(api.inspect().cacheStatus, 'unavailable');
   const isolated = environment(), isolatedApi = isolated.install();
   assert.equal(isolated.window.events.get('message')?.size ?? 0, 0); isolatedApi.dispose();
+});
+
+test('app language overrides browser language and switches the existing bar in place', () => {
+  const env = environment();
+  env.window.navigator = { language: 'en-GB' };
+  env.document.hasFocus = () => true;
+  const api = env.install(false);
+  api.setAccountSnapshot(snapshot(env));
+  const host = env.mounted(), bar = host.shadowRoot.querySelector('.cbu-bar');
+  const pet = bar.querySelector('.cbu-pet');
+  assert.equal(bar.getAttribute('lang'), 'zh-CN');
+  assert.equal(api.inspect().focused, true);
+  bar.querySelector('.cbu-toggle').dispatchEvent({ type: 'click' });
+  bar.querySelector('.cbu-info').dispatchEvent({ type: 'click' });
+  const values = ['secondary', 'primary', 'cache'].map(key => label(bar, key));
+  for (const [declared, expected] of [['en-US', 'en'], ['fr-FR', 'en'], ['zh-Hant', 'zh-CN']]) {
+    env.document.documentElement.setAttribute('lang', declared);
+    env.mutate(); env.flush();
+    assert.equal(env.mounted(), host);
+    assert.equal(host.shadowRoot.querySelector('.cbu-bar'), bar);
+    assert.equal(bar.querySelector('.cbu-pet'), pet);
+    assert.equal(bar.getAttribute('lang'), expected);
+    assert.equal(bar.getAttribute('dir'), 'ltr');
+    assert.equal(api.inspect().locale, expected);
+    assert.equal(bar.dataset.mode, 'compact');
+    assert.equal(bar.querySelector('.cbu-source-panel').hidden, false);
+    assert.deepEqual(['secondary', 'primary', 'cache'].map(key => label(bar, key)), values);
+  }
+  api.dispose();
+  assert.equal(env.window.listenerCount(), 0);
+});
+
+test('language resolution uses only declared locale and browser fallback, never settings or content', () => {
+  const env = environment();
+  env.document.documentElement.removeAttribute('lang');
+  env.window.navigator = { language: 'zh-TW' };
+  let forbidden = 0;
+  for (const name of ['localStorage', 'sessionStorage']) Object.defineProperty(env.window, name, {
+    get() { forbidden++; throw new Error('settings access forbidden'); }
+  });
+  Object.defineProperty(env.editor, 'textContent', {
+    get() { forbidden++; throw new Error('content access forbidden'); }
+  });
+  const api = env.install(false);
+  assert.equal(api.inspect().locale, 'zh-CN');
+  env.window.navigator.language = 'ar';
+  env.window.dispatchEvent({ type: 'languagechange' }); env.flush();
+  assert.equal(api.inspect().locale, 'en');
+  assert.equal(env.mounted().shadowRoot.querySelector('.cbu-bar').getAttribute('dir'), 'ltr');
+  assert.equal(forbidden, 0);
+  env.document.visibilityState = 'hidden';
+  assert.equal(api.inspect().visible, false);
+  api.dispose(); assert.equal(env.window.listenerCount(), 0);
 });

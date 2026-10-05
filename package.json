@@ -1,5 +1,5 @@
 {
-  "name": "codex-usage-bar", "version": "0.8.0", "private": true,
+  "name": "codex-usage-bar", "version": "0.9.0", "private": true,
   "description": "Reproducible build of the local Sprig companion bundle",
   "license": "MIT",
   "scripts": {"build:sprig":"node scripts/build-sprig.mjs", "check:sprig":"node scripts/build-sprig.mjs --check"},

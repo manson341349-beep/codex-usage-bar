@@ -176,6 +176,7 @@
     let hiddenFingerprint = null;
     let naturalHeight = 0;
     let currentTheme = null;
+    let currentLocale = null;
     // Only the selected conversation identifier and numeric usage live here.
     // No conversation records, titles, messages or log files are requested.
     let cacheThread = null;
@@ -189,6 +190,15 @@
     function listen(node, name, handler, capture) {
       node.addEventListener(name, handler, capture || false);
       listeners.push([node, name, handler, capture || false]);
+    }
+
+    function locale() {
+      // Codex writes its resolved UI locale here from the same value used by
+      // its IntlProvider. Browser/OS language can differ from an app override.
+      const app = document.documentElement.getAttribute('lang');
+      const browser = window.navigator && window.navigator.language;
+      const value = typeof app === 'string' && app.trim() ? app : browser;
+      return typeof value === 'string' && /^zh(?:[-_]|$)/i.test(value.trim()) ? 'zh-CN' : 'en';
     }
 
     function theme() {
@@ -421,7 +431,7 @@
           ancestorChain(target.portal) || [], nativePortalChildren)) {
         const style = window.getComputedStyle(node);
         values.push(rect(node), node.clientWidth, node.clientHeight, style.overflowX,
-          style.overflowY, style.display, style.visibility, style.transform, style.zoom,
+          style.overflowY, style.display, style.visibility, style.transform, style.zoom, style.direction,
           style.paddingLeft, style.paddingRight, style.borderLeftWidth, style.borderRightWidth);
       }
       return JSON.stringify(values);
@@ -442,7 +452,11 @@
         return 'unmeasurable';
       }
       host.style.setProperty('width', (shell.width / scale) + 'px', 'important');
-      host.style.setProperty('left', ((shell.left - base.left) / scale) + 'px', 'important');
+      // An RTL containing block anchors a narrower block to its right edge.
+      // Measure after sizing so the physical left offset uses that final origin.
+      const sized = rect(host);
+      if (!validRect(sized)) return 'unmeasurable';
+      host.style.setProperty('left', ((shell.left - sized.left) / scale) + 'px', 'important');
       return null;
     }
 
@@ -596,6 +610,7 @@
       target = null;
       layout = null;
       currentTheme = null;
+      currentLocale = null;
       hiddenFingerprint = null;
       naturalHeight = 0;
       state = 'unmounted';
@@ -622,7 +637,7 @@
         // Global reduced-motion rules can still create sub-millisecond transitions.
         // Geometry probes must settle synchronously on our own containers.
         ownedSlot.style.cssText = 'display:block!important;position:relative!important;box-sizing:border-box!important;' +
-          'transition:none!important;animation:none!important;' +
+          'transition:none!important;animation:none!important;direction:ltr!important;' +
           'width:100%!important;min-width:0!important;height:auto!important;margin:0!important;padding:0!important;border:0!important;';
         next.root.insertBefore(ownedSlot, next.shell);
         target.portal = ownedSlot;
@@ -631,7 +646,7 @@
       knownHosts.add(host);
       host.setAttribute('data-codex-usage-bar', '');
       host.style.cssText = 'display:block!important;visibility:hidden!important;position:relative!important;' +
-        'transition:none!important;animation:none!important;' +
+        'transition:none!important;animation:none!important;direction:ltr!important;' +
         'box-sizing:border-box!important;width:100%!important;max-width:none!important;min-width:0!important;left:0!important;right:auto!important;' +
         'height:auto!important;margin:0 0 10px!important;padding:0!important;border:0!important;' +
         'flex:none!important;float:none!important;transform:none!important;' +
@@ -644,11 +659,14 @@
       shadow.append(stylesheet, container);
       target.portal.append(host);
       currentTheme = theme();
-      const result = window.CodexUsageBar.mount(container, { accountOnly: true, theme: currentTheme, visible: false });
+      currentLocale = locale();
+      const result = window.CodexUsageBar.mount(container, { accountOnly: true,
+        theme: currentTheme, locale: currentLocale, visible: false });
       // Retain even an incomplete return value so its destroy method can run on failure.
       mounted = result;
       if (!mounted || typeof mounted.update !== 'function' || typeof mounted.destroy !== 'function' ||
-          typeof mounted.setTheme !== 'function' || typeof mounted.setVisible !== 'function' || !(mounted.element instanceof Element) ||
+          typeof mounted.setTheme !== 'function' || typeof mounted.setLocale !== 'function' ||
+          typeof mounted.setVisible !== 'function' || !(mounted.element instanceof Element) ||
           !container.contains(mounted.element)) throw new Error('usage-bar-invalid-renderer');
       mounted.update(effective);
       observeGeometry();
@@ -679,6 +697,11 @@
         if (nextTheme !== currentTheme) {
           currentTheme = nextTheme;
           mounted.setTheme(nextTheme);
+        }
+        const nextLocale = locale();
+        if (nextLocale !== currentLocale) {
+          currentLocale = nextLocale;
+          mounted.setLocale(nextLocale);
         }
         checkLayout();
       } catch (_) {
@@ -736,8 +759,11 @@
         return !disposed;
       },
       inspect: function () {
-        // Fixed state labels and numeric geometry only: no DOM nodes, identifiers or text.
+        // Fixed state/locale labels, visibility and numeric geometry only:
+        // no DOM nodes, identifiers, settings records or content text.
         return { status: state, reason: reason, homeOnly: homeOnly,
+          locale: locale(), focused: typeof document.hasFocus === 'function' && document.hasFocus(),
+          visible: document.visibilityState !== 'hidden' && document.hidden !== true,
           cacheStatus: effective.cache ? effective.cache.status : 'unavailable',
           companion: mounted && typeof mounted.inspectCompanion === 'function' ? mounted.inspectCompanion() : null,
           layout: layout === null ? null : JSON.parse(JSON.stringify(layout)) };
@@ -761,7 +787,7 @@
       });
       mutation.observe(document.documentElement, {
         subtree: true, childList: true, attributes: true,
-        attributeFilter: ['class', 'style', 'hidden', 'inert', 'aria-hidden', 'contenteditable',
+        attributeFilter: ['class', 'style', 'lang', 'dir', 'hidden', 'inert', 'aria-hidden', 'contenteditable',
           'data-theme', 'data-codex-composer-root', 'data-composer-placement', 'data-codex-usage-bar-slot',
           'data-above-composer-portal', 'data-above-composer-conversation-id',
           'data-app-action-sidebar-thread-id', 'data-app-action-sidebar-thread-kind',
@@ -769,6 +795,7 @@
           'data-content-search-turn-key', 'data-turn-key']
       });
       listen(window, 'resize', schedule);
+      listen(window, 'languagechange', schedule);
       if (!homeOnly) listen(window, 'message', receiveCache);
       listen(window, 'popstate', schedule);
       listen(window, 'hashchange', schedule);

@@ -1,8 +1,12 @@
 # codex-usage-bar
 
+[English](README.en.md) | [简体中文](README.md)
+
 ![codex-usage-bar 功能概览：原生输入框上方的额度栏、原创 Sprig 3D 伙伴、一键折叠与主题适配。图中额度为虚构示例。](docs/assets/overview.svg)
 
-Codex 日常桌面实例的额度信息栏，带原创软胶风格 3D 角色芽团 Sprig。版本 **0.8.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+Codex 日常桌面实例的额度信息栏，带原创软胶风格 3D 角色芽团 Sprig。版本 **0.9.0，macOS**；统一仓库为未来 Windows 实现保留平台目录。
+
+**语言：** 横条实时跟随 Codex 的 App 语言设置：中文语系显示简体中文，其余语言显示 English。菜单栏在下一次状态刷新时同步；尚未连接 Codex 时，先按系统语言选择中英文。切换语言保留当前额度、缓存与展开状态。GitHub README 不会跟随 App 语言自动切换，请使用顶部链接手动选择文档语言。
 
 > **在日常 Codex 的原生输入框上方显示额度，首页和会话页面都可使用。** 继续使用原有账号、历史、设置和项目；输入文字、输入法组合输入和进入会话不再主动卸载横条。它是原版 Codex 的启动伴侣，不修改官方应用安装包。
 >
@@ -100,9 +104,9 @@ node scripts/build-sprig.mjs --check
 python3 scripts/validate.py
 python3 -B -m unittest discover -s tests -v
 python3 -B -m unittest discover -s platforms/macos -p 'test_*.py' -v
-node --test tests/test_frontend.js tests/test_sprig_runtime.js
+node --test tests/test_frontend.js tests/test_sprig_runtime.js tests/test_i18n.js
 python3 platforms/macos/build.py
-python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.8.0-source.zip
+python3 platforms/macos/build.py --source-output dist/codex-usage-bar-v0.9.0-source.zip
 ```
 
 构建只使用白名单文件，编译原生菜单栏启动器，并拒绝覆盖现有产物。测试数据均为人工构造；真实日常验收与离线测试分开报告。`codex_bar/` 包含独立和日常两套生命周期，`web/` 包含自有前端与注明许可的 Three.js，`platforms/macos/` 是当前平台入口，`platforms/windows/` 仅为未来规划。
